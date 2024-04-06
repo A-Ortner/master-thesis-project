@@ -781,7 +781,7 @@ case class CountJoin(
 
   // Ignore hint for canonicalization
   protected override def doCanonicalize(): LogicalPlan =
-    super.doCanonicalize().asInstanceOf[Join].copy(hint = JoinHint.NONE)
+    super.doCanonicalize().asInstanceOf[CountJoin].copy(hint = JoinHint.NONE)
 
   // Do not include an empty join hint in string description
   protected override def stringArgs: Iterator[Any] = super.stringArgs.filter { e =>

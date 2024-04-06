@@ -19,9 +19,9 @@ package org.apache.spark.sql.execution.adaptive
 
 import org.apache.spark.MapOutputStatistics
 import org.apache.spark.sql.catalyst.optimizer.JoinSelectionHelper
-import org.apache.spark.sql.catalyst.planning.ExtractEquiJoinKeys
+import org.apache.spark.sql.catalyst.planning.{ExtractCountJoinEquiJoinKeys, ExtractEquiJoinKeys}
 import org.apache.spark.sql.catalyst.plans.{LeftAnti, LeftOuter, RightOuter}
-import org.apache.spark.sql.catalyst.plans.logical.{HintInfo, Join, JoinStrategyHint, LogicalPlan, NO_BROADCAST_HASH, PREFER_SHUFFLE_HASH, SHUFFLE_HASH}
+import org.apache.spark.sql.catalyst.plans.logical.{CountJoin, HintInfo, Join, JoinStrategyHint, LogicalPlan, NO_BROADCAST_HASH, PREFER_SHUFFLE_HASH, SHUFFLE_HASH}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.internal.SQLConf
 
@@ -104,6 +104,59 @@ object DynamicJoinSelection extends Rule[LogicalPlan] with JoinSelectionHelper {
     }
   }
 
+  private def selectCountJoinStrategy(
+                                  join: CountJoin,
+                                  isLeft: Boolean): Option[JoinStrategyHint] = {
+    val plan = if (isLeft) join.left else join.right
+    plan match {
+      case LogicalQueryStage(_, stage: ShuffleQueryStageExec) if stage.isMaterialized
+        && stage.mapStats.isDefined =>
+
+        val manyEmptyInPlan = hasManyEmptyPartitions(stage.mapStats.get)
+        val canBroadcastPlan = (isLeft && canBuildBroadcastLeft(join.joinType)) ||
+          (!isLeft && canBuildBroadcastRight(join.joinType))
+        val manyEmptyInOther = (if (isLeft) join.right else join.left) match {
+          case LogicalQueryStage(_, stage: ShuffleQueryStageExec) if stage.isMaterialized
+            && stage.mapStats.isDefined => hasManyEmptyPartitions(stage.mapStats.get)
+          case _ => false
+        }
+        logWarning("canBroadcastPlan: " + canBroadcastPlan)
+
+        val demoteBroadcastHash = if (manyEmptyInPlan && canBroadcastPlan) {
+          join.joinType match {
+            // don't demote BHJ since you cannot short circuit local join if inner (null-filled)
+            // side is empty
+            case LeftOuter | RightOuter | LeftAnti => false
+            case _ => true
+          }
+        } else if (manyEmptyInOther && canBroadcastPlan) {
+          // for example, LOJ, !isLeft but it's the LHS that has many empty partitions if we
+          // proceed with shuffle.  But if we proceed with BHJ, the OptimizeShuffleWithLocalRead
+          // will assemble partitions as they were before the shuffle and that may no longer have
+          // many empty partitions and thus cannot short-circuit local join
+          join.joinType match {
+            case LeftOuter | RightOuter | LeftAnti => true
+            case _ => false
+          }
+        } else {
+          false
+        }
+
+        val preferShuffleHash = preferShuffledHashJoin(stage.mapStats.get)
+        if (demoteBroadcastHash && preferShuffleHash) {
+          Some(SHUFFLE_HASH)
+        } else if (demoteBroadcastHash) {
+          Some(NO_BROADCAST_HASH)
+        } else if (preferShuffleHash) {
+          Some(PREFER_SHUFFLE_HASH)
+        } else {
+          None
+        }
+
+      case _ => None
+    }
+  }
+
   def apply(plan: LogicalPlan): LogicalPlan = plan.transformDown {
     case j @ ExtractEquiJoinKeys(_, _, _, _, _, _, _, hint) =>
       var newHint = hint
@@ -119,6 +172,33 @@ object DynamicJoinSelection extends Rule[LogicalPlan] with JoinSelectionHelper {
             Some(hint.rightHint.getOrElse(HintInfo()).copy(strategy = Some(strategy))))
         }
       }
+      logWarning("hint: " + hint)
+      logWarning("newHint: " + newHint)
+      if (newHint.ne(hint)) {
+        j.copy(hint = newHint)
+      } else {
+        j
+      }
+    case j @ ExtractCountJoinEquiJoinKeys(_, _, _, _, _, _, _, _, _, hint) =>
+      var newHint = hint
+      if (!hint.leftHint.exists(_.strategy.isDefined)) {
+        selectCountJoinStrategy(j, true).foreach { strategy =>
+          logWarning("strategy: " + strategy)
+          newHint = newHint.copy(leftHint =
+            Some(hint.leftHint.getOrElse(HintInfo()).copy(strategy = Some(strategy))))
+          logWarning("new hint: " + newHint)
+        }
+      }
+      if (!hint.rightHint.exists(_.strategy.isDefined)) {
+        selectCountJoinStrategy(j, false).foreach { strategy =>
+          logWarning("strategy: " + strategy)
+          newHint = newHint.copy(rightHint =
+            Some(hint.rightHint.getOrElse(HintInfo()).copy(strategy = Some(strategy))))
+          logWarning("new hint: " + newHint)
+        }
+      }
+      logWarning("hint: " + hint)
+      logWarning("newHint: " + newHint)
       if (newHint.ne(hint)) {
         j.copy(hint = newHint)
       } else {

@@ -71,14 +71,16 @@ case class BroadcastHashCountJoinExec(
     }
   }
 
+  override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.references.head)
+
   override lazy val outputPartitioning: Partitioning = {
     joinType match {
-      case _: InnerLike if conf.broadcastHashJoinOutputPartitioningExpandLimit > 0 =>
-        streamedPlan.outputPartitioning match {
-          case h: HashPartitioning => expandOutputPartitioning(h)
-          case c: PartitioningCollection => expandOutputPartitioning(c)
-          case other => other
-        }
+//      case _: InnerLike if conf.broadcastHashJoinOutputPartitioningExpandLimit > 0 =>
+//        streamedPlan.outputPartitioning match {
+//          case h: HashPartitioning => expandOutputPartitioning(h)
+//          case c: PartitioningCollection => expandOutputPartitioning(c)
+//          case other => other
+//        }
       case _ => streamedPlan.outputPartitioning
     }
   }

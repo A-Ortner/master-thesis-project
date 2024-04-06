@@ -65,6 +65,8 @@ trait HashCountJoin extends JoinCodegenSupport {
     }
   }
 
+  override def supportCodegen: Boolean = false
+
   override def outputPartitioning: Partitioning = buildSide match {
     case BuildLeft =>
       joinType match {
