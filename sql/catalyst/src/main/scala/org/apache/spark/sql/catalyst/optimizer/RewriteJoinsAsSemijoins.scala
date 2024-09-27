@@ -35,27 +35,28 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                   aggExpressions: Seq[NamedExpression], projectList: Seq[NamedExpression],
                   join: Join, keyRefs: Seq[Seq[Expression]],
                   uniqueConstraints: Seq[Seq[Expression]]) : LogicalPlan = {
-    logWarning("applying yannakakis rewriting to join: " + agg)
+    val startTime = System.nanoTime()
+    logTrace("applying yannakakis rewriting to join: " + agg)
     // TODO allow different joins
     // logWarning("join type: " + joinType)
     val (items, conditions) = extractInnerJoins(join)
-    logWarning("agg(project(join))")
-    logWarning("items: " + items.toString())
-    logWarning("conditions: " + conditions)
-    for (agg <- aggExpressions) {
-      logWarning("agg: " + agg)
-      logWarning("is 0MA: " + is0MA(agg))
-      logWarning("is counting: " + isCounting(agg))
-      logWarning("is percentile: " + isPercentile(agg))
-      logWarning("is sum: " + isSum(agg))
-      logWarning("is avg: " + isAverage(agg))
-      logWarning("is non-agg: " + isNonAgg(agg))
-    }
+//    logWarning("agg(project(join))")
+//    logWarning("items: " + items.toString())
+//    logWarning("conditions: " + conditions)
+//    for (agg <- aggExpressions) {
+//      logWarning("agg: " + agg)
+//      logWarning("is 0MA: " + is0MA(agg))
+//      logWarning("is counting: " + isCounting(agg))
+//      logWarning("is percentile: " + isPercentile(agg))
+//      logWarning("is sum: " + isSum(agg))
+//      logWarning("is avg: " + isAverage(agg))
+//      logWarning("is non-agg: " + isNonAgg(agg))
+//    }
 
     val aggregateAttributes = aggExpressions.map(expr => expr.references)
       .reduce((a1, a2) => a1 ++ a2)
-    logWarning("aggregate attributes: " + aggregateAttributes)
-    logWarning("groupingExpressions: " + groupingExpressions)
+//    logWarning("aggregate attributes: " + aggregateAttributes)
+//    logWarning("groupingExpressions: " + groupingExpressions)
     val groupAttributes = if (groupingExpressions.isEmpty) {
       AttributeSet.empty
     }
@@ -93,7 +94,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
       && countingAggregates.isEmpty
       && sumAggregates.isEmpty
       && averageAggregates.isEmpty) {
-      logWarning("query is not applicable (0MA, counting, percentile, sum)")
+      logTrace("query is not applicable (0MA, counting, percentile, sum)")
       agg
     }
     else {
@@ -102,11 +103,12 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
 
       val allAggAttributes = aggregateAttributes ++ groupAttributes
       val hg = new Hypergraph(items, conditions)
-      logWarning("hypergraph:\n" + hg.toString)
+//      logWarning("hypergraph:\n" + hg.toString)
       val jointree = hg.flatGYO
 
       if (jointree == null) {
-        logWarning("join is cyclic")
+        logTrace("join is cyclic")
+        logWarning("time difference: " + (System.nanoTime() - startTime))
         agg
       }
       else {
@@ -115,12 +117,13 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
         // contained in the aggregate functions and the GROUP BY clause
         val nodeContainingAttributes = jointree.findNodeContainingAttributes(allAggAttributes)
         if (nodeContainingAttributes == null) {
-          logWarning("query is not 0MA")
+          logTrace("query is not 0MA")
+          logWarning("time difference: " + (System.nanoTime() - startTime))
           agg
         }
         else {
           val root = nodeContainingAttributes.reroot
-          logWarning("rerooted: \n" + root)
+//          logTrace("rerooted tree: \n" + root)
 
           if (countingAggregates.isEmpty
             && percentileAggregates.isEmpty
@@ -132,6 +135,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
             val newAgg = Aggregate(groupingExpressions, aggExpressions,
               yannakakisJoins)
             logWarning("new aggregate: " + newAgg)
+            logWarning("time difference: " + (System.nanoTime() - startTime))
             newAgg
           }
           else {
@@ -141,7 +145,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                 .filter(agg => agg.references.isEmpty)
               val nonnullCountingAggregates = countingAggregates
                 .filter(agg => agg.references.nonEmpty)
-              logWarning("star counting aggregates: " + starCountingAggregates)
+//              logWarning("star counting aggregates: " + starCountingAggregates)
               val (yannakakisJoins, countingAttribute, _, _) =
                 root.buildBottomUpJoinsCounting(aggregateAttributes, keyRefs, uniqueConstraints,
                   conf.yannakakisCountGroupInLeavesEnabled,
@@ -159,10 +163,11 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                 newCountingAggregates ++ projectExpressions,
                 Project(projectList ++ Seq(countingAttribute), yannakakisJoins))
               logWarning("new aggregate: " + newAgg)
+              logWarning("time difference: " + (System.nanoTime() - startTime))
               newAgg
             }
             else if (percentileAggregates.nonEmpty) {
-              logWarning("percentile aggregates: " + percentileAggregates)
+//              logWarning("percentile aggregates: " + percentileAggregates)
               val (yannakakisJoins, countingAttribute, _, lastJoinWasSemijoin) =
                 root.buildBottomUpJoinsCounting(aggregateAttributes, keyRefs, uniqueConstraints,
                   conf.yannakakisCountGroupInLeavesEnabled,
@@ -184,11 +189,12 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                 newPercentileAggregates ++ projectExpressions,
                 Project(projectList ++ Seq(countingAttribute), yannakakisJoins))
               logWarning("new aggregate: " + newAgg)
+              logWarning("time difference: " + (System.nanoTime() - startTime))
               newAgg
             }
             else if (averageAggregates.nonEmpty) {
-              logWarning("average aggregates: " + averageAggregates)
-              logWarning("project exprs: " + projectExpressions)
+//              logWarning("average aggregates: " + averageAggregates)
+//              logWarning("project exprs: " + projectExpressions)
               val (yannakakisJoins, countingAttribute, _, _) =
                 root.buildBottomUpJoinsCounting(aggregateAttributes, keyRefs, uniqueConstraints,
                   conf.yannakakisCountGroupInLeavesEnabled,
@@ -200,7 +206,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                     val aggAttribute = aggFn.references.head
                     val sumAggregateExpr = AggregateExpression(aggFn.transformUp {
                       case a@Average(c, evalMode) =>
-                        logWarning("avg: " + a)
+//                        logWarning("avg: " + a)
                         Sum(c.transformUp {
                           case att: Attribute => Multiply(att,
                             Cast(countingAttribute, att.dataType), evalMode)
@@ -210,10 +216,6 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                       If(aggAttribute.isNull,
                         Literal(0L, LongType), countingAttribute))
                       .toAggregateExpression()
-                    logWarning("sum resolved: " + sumAggregateExpr.resolved)
-                    logWarning("count resolved: " + countAggregateExpr.resolved)
-                    logWarning("sum children resolved: " + sumAggregateExpr.childrenResolved)
-                    logWarning("count children resolved: " + countAggregateExpr.childrenResolved)
                   Cast(
                     // Check if both aggregate results are of type Double - can do integer division
                     if (DoubleType.acceptsType(sumAggregateExpr.dataType) &&
@@ -225,27 +227,16 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                         Cast(countAggregateExpr, DoubleDecimal))
                     }, aggExpr.dataType)
                 }).asInstanceOf[Seq[NamedExpression]]
-              newAverageAggregates.foreach(agg => {
-                logWarning("new agg: " + agg)
-                logWarning("new agg resolevd: " + agg.resolved)
-                logWarning("data type: " + agg.dataType)
-                agg.foreachUp(a => {
-                  logWarning("2 new agg: " + a)
-                  logWarning("2 new agg resolevd: " + a.resolved)
-                  logWarning("2 new agg type check: " + a.checkInputDataTypes())
-                  logWarning("2data type: " + a.dataType)
-                })
-              }
-              )
               val newAgg = Aggregate(groupingExpressions, newAverageAggregates ++
                 projectExpressions,
                 Project(projectList ++ Seq(countingAttribute), yannakakisJoins))
               logWarning("new aggregate: " + newAgg)
+              logWarning("time difference: " + (System.nanoTime() - startTime))
               newAgg
             }
             else {
-              logWarning("sum aggregates: " + sumAggregates)
-              logWarning("project exprs: " + projectExpressions)
+//              logWarning("sum aggregates: " + sumAggregates)
+//              logWarning("project exprs: " + projectExpressions)
               val (yannakakisJoins, countingAttribute, _, _) =
                 root.buildBottomUpJoinsCounting(aggregateAttributes, keyRefs, uniqueConstraints,
                   conf.yannakakisCountGroupInLeavesEnabled,
@@ -256,7 +247,6 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                   case AggregateExpression(aggFn, mode, isDistinct, filter, resultId) =>
                     AggregateExpression(aggFn.transformUp {
                     case s @ Sum(c, evalMode) =>
-                      logWarning("sum: " + s)
                       Sum(c.transformUp {
                       case att: Attribute => Multiply(att,
                         Cast(countingAttribute, att.dataType), evalMode)
@@ -267,6 +257,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
               //  yannakakisJoins)
               Project(projectList ++ Seq(countingAttribute), yannakakisJoins))
               logWarning("new aggregate: " + newAgg)
+              logWarning("time difference: " + (System.nanoTime() - startTime))
               newAgg
             }
           }
@@ -469,12 +460,12 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
     val vertices = edge.vertices
     val primaryKeys = AttributeSet(keyRefs.map(ref => ref.last.references.head))
     val uniqueSets = uniqueConstraints.map(constraint => AttributeSet(constraint))
-    logWarning("stats: " + scanPlan.stats)
-    logWarning("size: " + scanPlan.stats.sizeInBytes)
-    logWarning("rows: " + scanPlan.stats.rowCount.getOrElse("none"))
-    logWarning("unique sets: " + uniqueSets)
-    logWarning("output set: " + scanPlan.outputSet)
-    logWarning("subset: " + uniqueSets.exists(uniqueSet => uniqueSet subsetOf scanPlan.outputSet))
+//    logWarning("stats: " + scanPlan.stats)
+//    logWarning("size: " + scanPlan.stats.sizeInBytes)
+//    logWarning("rows: " + scanPlan.stats.rowCount.getOrElse("none"))
+//    logWarning("unique sets: " + uniqueSets)
+//    logWarning("output set: " + scanPlan.outputSet)
+//    logWarning("subset: " + uniqueSets.exists(uniqueSet => uniqueSet subsetOf scanPlan.outputSet))
 
     // Get the attributes as part of the join tree
     val nodeAttributes = AttributeSet(vertices.map(v => edge.vertexToAttribute(v)))
@@ -486,7 +477,7 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
       ! nodeAttributes.exists(att => primaryKeys contains att) &&
       ! scanPlan.output.exists(att => aggregateAttributes contains att) &&
       ! uniqueSets.exists(uniqueSet => uniqueSet subsetOf scanPlan.outputSet)
-    logWarning("group here: " + groupHere)
+//    logWarning("group here: " + groupHere)
 
     var prevCountExpr: NamedExpression = if (groupHere) {
       Alias(Count(Literal(1L, LongType)).toAggregateExpression(), "c")()
@@ -495,9 +486,9 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
       Alias(Literal(1L, LongType), "c")()
     }
 
-    logWarning("edge: " + edge)
-    logWarning("node attributes: " + nodeAttributes)
-    logWarning("filtered: " + scanPlan.output.filter(att => nodeAttributes contains att))
+//    logWarning("edge: " + edge)
+//    logWarning("node attributes: " + nodeAttributes)
+//    logWarning("filtered: " + scanPlan.output.filter(att => nodeAttributes contains att))
     // Only group counts in leaves if it is explicitly enabled and there are no known
     // primary keys in the leaf
     val outputAttributes = scanPlan.output.filter(att => (nodeAttributes contains att)
@@ -518,9 +509,7 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
 
     var prevChildEdge: HGEdge = edge
     for (c <- children) {
-      logWarning("child: " + c)
       val childEdge = c.edges.head
-      logWarning("child edge: " + childEdge)
       val childVertices = childEdge.vertices
       val overlappingVertices = vertices intersect childVertices
       val (bottomUpJoins, childCountExpr, rightPlanIsLeaf, childWasSemijoined) =
@@ -547,15 +536,15 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
           prevChildEdge.vertices.map(v => prevChildEdge.vertexToAttribute(v)))
         // Check if the grouping attributes contain a primary key.
         // In this case, grouping would not remove any tuples, hence do not aggregate.
-        logWarning("left")
-        logWarning("child edges: " + c.edges)
-        logWarning("node attributes: " + nodeAttributes)
-        logWarning("aggregate attributes: " + aggregateAttributes)
-        logWarning("group attributes: " + groupAttributes)
-        logWarning("primary keys: " + primaryKeys)
-        logWarning("prev child edge: " + prevChildEdge)
-        logWarning("prev child attributes: " + prevChildAttributes)
-        logWarning("prev semi joined: " + prevSemijoined)
+//        logWarning("left")
+//        logWarning("child edges: " + c.edges)
+//        logWarning("node attributes: " + nodeAttributes)
+//        logWarning("aggregate attributes: " + aggregateAttributes)
+//        logWarning("group attributes: " + groupAttributes)
+//        logWarning("primary keys: " + primaryKeys)
+//        logWarning("prev child edge: " + prevChildEdge)
+//        logWarning("prev child attributes: " + prevChildAttributes)
+//        logWarning("prev semi joined: " + prevSemijoined)
 
         // Don't perform aggregation afterwards if a countjoin was performed
         if (usePhysicalCountJoin
@@ -581,12 +570,12 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
           (bottomUpJoins, childCountExpr.toAttribute)
         }
         else {
-          logWarning("right")
-          logWarning("child edges: " + c.edges)
-          logWarning("node attributes: " + nodeAttributes)
-          logWarning("aggregate attributes: " + aggregateAttributes)
-          logWarning("group attributes: " + countGroupRight)
-          logWarning("primary keys: " + primaryKeys)
+//          logWarning("right")
+//          logWarning("child edges: " + c.edges)
+//          logWarning("node attributes: " + nodeAttributes)
+//          logWarning("aggregate attributes: " + aggregateAttributes)
+//          logWarning("group attributes: " + countGroupRight)
+//          logWarning("primary keys: " + primaryKeys)
           (Aggregate(countGroupRight,
             Seq(countExpressionRight) ++ countGroupRight, bottomUpJoins),
             countExpressionRight.toAttribute)
@@ -609,12 +598,12 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
           // and if the pk is contained in the child node attributes
         && ref.last.references.head.exprId == atts._2.exprId))
 
-      logWarning("keyRefs: " + keyRefs)
-      logWarning("edge: " + edge)
-      logWarning("overlapping vertices: " + overlappingVertices
-        .map(vertex => (edge.vertexToAttribute(vertex), childEdge.vertexToAttribute(vertex))))
-      logWarning("can semi join: " + canSemiJoin)
-      logWarning("use physical count join: " + usePhysicalCountJoin)
+//      logWarning("keyRefs: " + keyRefs)
+//      logWarning("edge: " + edge)
+//      logWarning("overlapping vertices: " + overlappingVertices
+//        .map(vertex => (edge.vertexToAttribute(vertex), childEdge.vertexToAttribute(vertex))))
+//      logWarning("can semi join: " + canSemiJoin)
+//      logWarning("use physical count join: " + usePhysicalCountJoin)
 
       val join = if (usePhysicalCountJoin && !canSemiJoin) {
         // Only apply the CountJoin operator when the option is explicitly
@@ -626,7 +615,7 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
         Join(leftPlan, rightPlan,
           if (canSemiJoin) LeftSemi else Inner, Option(joinConditions), joinHint)
       }
-      logWarning("join output: " + join.output)
+//      logWarning("join output: " + join.output)
       val finalCountExpr = if (canSemiJoin) {
         // When semi-joining we only have one count attribute
         leftCountAttribute
@@ -660,7 +649,7 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
       this
     }
     else {
-      logWarning("parent: " + parent)
+//      logWarning("parent: " + parent)
       var current = this
       var newCurrent = this.copy(newParent = null)
       val root = newCurrent
@@ -668,9 +657,9 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
         val p = current.parent
         logWarning("p: " + p)
         val newChild = p.copy(newChildren = p.children - current, newParent = null)
-        logWarning("new child: " + newChild)
+//        logWarning("new child: " + newChild)
         newCurrent.children += newChild
-        logWarning("c: " + current)
+//        logWarning("c: " + current)
         current = p
         newCurrent = newChild
       }
@@ -682,10 +671,10 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
     val nodeAttributes = edges
       .map(e => e.planReference.outputSet)
       .reduce((e1, e2) => e1 ++ e2)
-    logWarning("aggAttributes: " + aggAttributes)
-    logWarning("nodeAttributes: " + nodeAttributes)
+//    logWarning("aggAttributes: " + aggAttributes)
+//    logWarning("nodeAttributes: " + nodeAttributes)
     if (aggAttributes subsetOf nodeAttributes) {
-      logWarning("found subset in:\n" + this)
+//      logWarning("found subset in:\n" + this)
       this
     } else {
       for (c <- children) {
@@ -732,7 +721,7 @@ class Hypergraph (private val items: Seq[LogicalPlan],
         val rAtt = rhs.references.head
         equivalenceClasses += Set(lAtt, rAtt)
       case other =>
-        logWarning("other")
+//        logWarning("other")
     }
   }
 
@@ -741,7 +730,7 @@ class Hypergraph (private val items: Seq[LogicalPlan],
 
   }
 
-  logWarning("equivalence classes: " + equivalenceClasses)
+//  logWarning("equivalence classes: " + equivalenceClasses)
 
   for (equivalenceClass <- equivalenceClasses) {
     val attName = equivalenceClass.head.toString
@@ -752,12 +741,12 @@ class Hypergraph (private val items: Seq[LogicalPlan],
     }
   }
 
-  logWarning("vertex to attribute mapping: " + vertexToAttributes)
-  logWarning("attribute to vertex mapping: " + attributeToVertex)
+//  logWarning("vertex to attribute mapping: " + vertexToAttributes)
+//  logWarning("attribute to vertex mapping: " + attributeToVertex)
 
   var tableIndex = 1
   for (item <- items) {
-    logWarning("join item: " + item)
+//    logWarning("join item: " + item)
 
     val projectAttributes = item.outputSet
     val hyperedgeVertices = projectAttributes
@@ -769,7 +758,7 @@ class Hypergraph (private val items: Seq[LogicalPlan],
     edges.add(hyperedge)
   }
 
-  logWarning("hyperedges: " + edges)
+//  logWarning("hyperedges: " + edges)
 
   private def combineEquivalenceClasses: Boolean = {
     for (set <- equivalenceClasses) {
@@ -820,9 +809,9 @@ class Hypergraph (private val items: Seq[LogicalPlan],
 
       var nodeAdded = false
       for (e <- gyoEdges) {
-        logWarning("gyo edge: " + e)
+//        logWarning("gyo edge: " + e)
         val supersets = gyoEdges.filter(o => o containsNotEqual e)
-        logWarning("supersets: " + supersets)
+//        logWarning("supersets: " + supersets)
 
         // For each edge e, check if it is not contained in another edge
         if (supersets.isEmpty) {
@@ -832,9 +821,9 @@ class Hypergraph (private val items: Seq[LogicalPlan],
           val childNodes = containedEdges
             .map(c => treeNodes.getOrElse(c.name, new HTNode(Set(c), Set(), null)))
             .toSet
-          logWarning("parentNode: " + parentNode)
+//          logWarning("parentNode: " + parentNode)
           parentNode.children ++= childNodes
-          logWarning("subsets: " + childNodes)
+//          logWarning("subsets: " + childNodes)
           if (childNodes.nonEmpty) {
             nodeAdded = true
           }
