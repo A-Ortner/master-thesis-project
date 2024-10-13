@@ -666,6 +666,8 @@ case class CountJoin(
                  condition: Option[Expression],
                  countLeft: Option[Expression],
                  countRight: Option[Expression],
+                 aggregatesRight: Seq[Expression],
+                 groupRight: Seq[Expression],
                  hint: JoinHint)
   extends BinaryNode with PredicateHelper {
 

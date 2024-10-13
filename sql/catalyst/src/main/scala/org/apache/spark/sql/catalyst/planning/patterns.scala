@@ -241,7 +241,8 @@ object ExtractCountJoinEquiJoinKeys extends Logging with PredicateHelper {
       Option[Expression], Option[Expression], JoinHint)
 
   def unapply(join: CountJoin): Option[ReturnType] = join match {
-    case CountJoin(left, right, joinType, condition, countLeft, countRight, hint) =>
+    case CountJoin(left, right, joinType, condition, countLeft, countRight,
+    aggsRight, groupRight, hint) =>
       logDebug(s"Considering join on: $condition")
       // Find equi-join predicates that can be evaluated before the join, and thus can be used
       // as join keys.

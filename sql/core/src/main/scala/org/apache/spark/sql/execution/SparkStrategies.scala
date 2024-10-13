@@ -502,7 +502,8 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
       // Selecting a CountJoin
 
 
-      case j @ logical.CountJoin(left, right, joinType, condition, countLeft, countRight, hint) =>
+      case j @ logical.CountJoin(left, right, joinType, condition, countLeft, countRight,
+      aggsRight, groupRight, hint) =>
         j match {
           case ExtractCountJoinEquiJoinKeys(joinType, leftKeys, rightKeys, nonEquiCond,
           _, left, right, countLeft, countRight, hint) =>

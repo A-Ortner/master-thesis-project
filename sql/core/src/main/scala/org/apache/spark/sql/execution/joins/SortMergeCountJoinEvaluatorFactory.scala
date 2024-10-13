@@ -81,6 +81,15 @@ class SortMergeCountJoinEvaluatorFactory(
       val rightCountOrdinal = AttributeSeq(right.output)
         .indexOf(countRight.get.references.head.exprId)
 
+      val groupAttributeCount = right.output.size - rightKeys.size - 1
+
+      logWarning(right.output.size + " " + rightKeys.size)
+      logWarning(right.output + " " + rightKeys)
+      logWarning(left.output + "")
+      if (groupAttributeCount > 0) {
+        logWarning("group atts found: " + right.output)
+      }
+
       joinType match {
         // TODO remove other join types as they get ignored in the countjoin
         case _: InnerLike =>

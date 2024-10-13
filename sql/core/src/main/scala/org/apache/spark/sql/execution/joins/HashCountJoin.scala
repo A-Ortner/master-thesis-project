@@ -48,6 +48,7 @@ trait HashCountJoin extends JoinCodegenSupport {
     s"$nodeName $joinType ${buildSide} ($opId)".trim
   }
 
+  // Gets overridden in BroadcastHashCountJoinExec, etc.
   override def output: Seq[Attribute] = {
     joinType match {
       case _: InnerLike =>
@@ -342,6 +343,14 @@ trait HashCountJoin extends JoinCodegenSupport {
 //    logWarning("right attributes: " + AttributeSeq(buildOutput))
 //    logWarning("count right: " + countRight)
 //    logWarning("right ordinal: " + rightCountOrdinal)
+    val groupAttributeCount = buildOutput.size - streamedBoundKeys.size - 1
+
+    logWarning(buildOutput.size + " " + streamedBoundKeys.size)
+    logWarning(buildOutput + " " + streamedBoundKeys)
+    logWarning(streamedOutput + "")
+    if (groupAttributeCount > 0) {
+      logWarning("group atts found: " + buildOutput)
+    }
 
     if (hashedRelation == EmptyHashedRelation) {
       Iterator.empty
