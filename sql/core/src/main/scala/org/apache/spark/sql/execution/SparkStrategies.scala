@@ -506,7 +506,7 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
       aggsRight, groupRight, hint) =>
         j match {
           case ExtractCountJoinEquiJoinKeys(joinType, leftKeys, rightKeys, nonEquiCond,
-          _, left, right, countLeft, countRight, hint) =>
+          _, left, right, countLeft, countRight, aggregatesRight, groupRight, hint) =>
             def createBroadcastHashCountJoin(onlyLookingAtHint: Boolean) = {
               logWarning("createBroadcastHashCountJoin")
               val buildSide = getBroadcastCountJoinBuildSide(
@@ -526,7 +526,9 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
                     planLater(left),
                     planLater(right),
                     countLeft,
-                    countRight))
+                    countRight,
+                    aggregatesRight,
+                    groupRight))
               }
             }
             def createShuffleHashCountJoin(onlyLookingAtHint: Boolean) = {
@@ -548,7 +550,9 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
                     planLater(left),
                     planLater(right),
                     countLeft,
-                    countRight))
+                    countRight,
+                    aggregatesRight,
+                    groupRight))
               }
             }
             def createSortMergeCountJoin() = {
@@ -562,7 +566,9 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
                   planLater(left),
                   planLater(right),
                   countLeft,
-                  countRight)))
+                  countRight,
+                  aggregatesRight,
+                  groupRight)))
               } else {
                 None
               }

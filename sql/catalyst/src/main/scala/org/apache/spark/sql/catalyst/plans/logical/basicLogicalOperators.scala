@@ -666,8 +666,8 @@ case class CountJoin(
                  condition: Option[Expression],
                  countLeft: Option[Expression],
                  countRight: Option[Expression],
-                 aggregatesRight: Seq[Expression],
-                 groupRight: Seq[Expression],
+                 aggregatesRight: Seq[AggregateExpression],
+                 groupRight: Seq[NamedExpression],
                  hint: JoinHint)
   extends BinaryNode with PredicateHelper {
 
@@ -711,7 +711,10 @@ case class CountJoin(
       case FullOuter =>
         left.output.map(_.withNullability(true)) ++ right.output.map(_.withNullability(true))
       case _ =>
-        left.output ++ right.output
+        // Standard CountJoin case
+        // left.output ++ right.output ++ aggregatesRight.map(_.resultAttribute)
+         left.output ++ Seq(countRight.get.references.head) ++
+           aggregatesRight.map(_.resultAttribute)
     }
   }
 

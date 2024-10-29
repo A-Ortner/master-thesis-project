@@ -22,6 +22,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.BindReferences.bindReferences
+import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateExpression
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.expressions.codegen.Block._
 import org.apache.spark.sql.catalyst.plans._
@@ -43,13 +44,16 @@ case class SortMergeCountJoinExec(
     right: SparkPlan,
     countLeft: Option[Expression],
     countRight: Option[Expression],
+    aggregatesRight: Seq[AggregateExpression],
+    groupRight: Seq[NamedExpression],
     isSkewJoin: Boolean = false) extends ShuffledJoin {
 
   override lazy val metrics = Map(
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
     "spillSize" -> SQLMetrics.createSizeMetric(sparkContext, "spill size"))
 
-  override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.references.head)
+  override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.references.head) ++
+    aggregatesRight.map(_.resultAttribute)
 
   override def outputPartitioning: Partitioning = left.outputPartitioning
   override def outputOrdering: Seq[SortOrder] = joinType match {
@@ -134,6 +138,8 @@ case class SortMergeCountJoinExec(
       right,
       countLeft: Option[Expression],
       countRight: Option[Expression],
+      aggregatesRight: Seq[AggregateExpression],
+      groupRight: Seq[NamedExpression],
       output,
       inMemoryThreshold,
       spillThreshold,

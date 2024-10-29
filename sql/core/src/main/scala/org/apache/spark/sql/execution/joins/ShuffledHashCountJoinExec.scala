@@ -23,13 +23,13 @@ import org.apache.spark.TaskContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateExpression
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight, BuildSide}
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution.{RowIterator, SparkPlan}
 import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
-import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.util.collection.{BitSet, OpenHashSet}
 
 /**
@@ -45,6 +45,8 @@ case class ShuffledHashCountJoinExec(
     right: SparkPlan,
     countLeft: Option[Expression],
     countRight: Option[Expression],
+    aggregatesRight: Seq[AggregateExpression],
+    groupRight: Seq[NamedExpression],
     isSkewJoin: Boolean = false)
   extends HashCountJoin with ShuffledJoin {
 
@@ -54,7 +56,8 @@ case class ShuffledHashCountJoinExec(
     "buildTime" -> SQLMetrics.createTimingMetric(sparkContext, "time to build hash map"))
 
   // override def output: Seq[Attribute] = super[ShuffledJoin].output
-  override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.references.head)
+  override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.references.head) ++
+    aggregatesRight.map(_.resultAttribute)
 
   override def outputPartitioning: Partitioning = super[ShuffledJoin].outputPartitioning
 
@@ -114,7 +117,8 @@ case class ShuffledHashCountJoinExec(
 //          buildSideOrFullOuterJoin(streamIter, hashed, numOutputRows, isFullOuterJoin = false)
 //        case RightOuter if buildSide.equals(BuildRight) =>
 //          buildSideOrFullOuterJoin(streamIter, hashed, numOutputRows, isFullOuterJoin = false)
-        case _ => join(streamIter, hashed, numOutputRows, countLeft, countRight)
+        case _ => join(streamIter, hashed, numOutputRows, countLeft, countRight,
+          aggregatesRight, groupRight)
       }
     }
   }
@@ -341,14 +345,7 @@ case class ShuffledHashCountJoinExec(
     streamResultIter ++ buildResultIter
   }
 
-  override def supportCodegen: Boolean = joinType match {
-    case FullOuter => conf.getConf(SQLConf.ENABLE_FULL_OUTER_SHUFFLED_HASH_JOIN_CODEGEN)
-    case LeftOuter if buildSide == BuildLeft =>
-      conf.getConf(SQLConf.ENABLE_BUILD_SIDE_OUTER_SHUFFLED_HASH_JOIN_CODEGEN)
-    case RightOuter if buildSide == BuildRight =>
-      conf.getConf(SQLConf.ENABLE_BUILD_SIDE_OUTER_SHUFFLED_HASH_JOIN_CODEGEN)
-    case _ => true
-  }
+  override def supportCodegen: Boolean = false
 
   override def inputRDDs(): Seq[RDD[InternalRow]] = {
     streamedPlan.execute() :: buildPlan.execute() :: Nil

@@ -17,16 +17,18 @@
 
 package org.apache.spark.sql.execution.joins
 
+import org.apache.spark.TaskContext
 import org.apache.spark.sql.catalyst.{InternalRow, SQLConfHelper}
 import org.apache.spark.sql.catalyst.analysis.CastSupport
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.BindReferences.bindReferences
+import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateFunction, Complete, DeclarativeAggregate, Final, NoOp, Partial, PartialMerge}
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight, BuildSide}
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
-import org.apache.spark.sql.execution.{CodegenSupport, ExplainUtils, RowIterator}
+import org.apache.spark.sql.execution.{CodegenSupport, ExplainUtils, RowIterator, UnsafeFixedWidthAggregationMap}
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types.{BooleanType, IntegralType, LongType, StructField, StructType}
 
@@ -327,7 +329,9 @@ trait HashCountJoin extends JoinCodegenSupport {
                         streamIter: Iterator[InternalRow],
                         hashedRelation: HashedRelation,
                         countLeft: Option[Expression],
-                        countRight: Option[Expression]): Iterator[InternalRow] = {
+                        countRight: Option[Expression],
+                        aggregatesRight: Seq[AggregateExpression],
+                        groupRight: Seq[NamedExpression]): Iterator[InternalRow] = {
     val joinKeys = streamSideKeyGenerator()
     val joinedRow = new JoinedRow
 
@@ -337,98 +341,167 @@ trait HashCountJoin extends JoinCodegenSupport {
       .indexOf(countLeft.get.references.head.exprId)
     val rightCountOrdinal = AttributeSeq(buildOutput)
       .indexOf(countRight.get.references.head.exprId)
-//    logWarning("left attributes: " + AttributeSeq(streamedOutput))
-//    logWarning("count left: " + countLeft)
-//    logWarning("left ordinal: " + leftCountOrdinal)
-//    logWarning("right attributes: " + AttributeSeq(buildOutput))
-//    logWarning("count right: " + countRight)
-//    logWarning("right ordinal: " + rightCountOrdinal)
-    val groupAttributeCount = buildOutput.size - streamedBoundKeys.size - 1
 
-    logWarning(buildOutput.size + " " + streamedBoundKeys.size)
-    logWarning(buildOutput + " " + streamedBoundKeys)
-    logWarning(streamedOutput + "")
-    if (groupAttributeCount > 0) {
-      logWarning("group atts found: " + buildOutput)
+    val doAggregation = aggregatesRight.nonEmpty
+
+    val aggregateFunctions = aggregatesRight.map(_.aggregateFunction).toArray
+
+    // Aggregate functions can only be DeclarativeAggregates (Sum, Min, Max)
+    val expressionAggInitialProjection = {
+      val initExpressions = aggregateFunctions.flatMap {
+        case ae: DeclarativeAggregate => ae.initialValues
+      }
+      MutableProjection.create(initExpressions, Nil)
     }
+
+    val bufferSchema = aggregateFunctions.flatMap(_.aggBufferAttributes)
+    val initialAggregationBuffer: UnsafeRow = UnsafeProjection.create(bufferSchema.map(_.dataType))
+      .apply(new GenericInternalRow(bufferSchema.length))
+    // Initialize declarative aggregates' buffer values
+    expressionAggInitialProjection.target(initialAggregationBuffer)(EmptyRow)
+
+    val evalExpressions = aggregateFunctions.map {
+      case ae: DeclarativeAggregate => ae.evaluateExpression
+      case agg: AggregateFunction => NoOp
+    }
+
+    val bufferAttributes = aggregateFunctions.flatMap(_.aggBufferAttributes)
+    val aggregateResult = new SpecificInternalRow(aggregatesRight.map(_.dataType))
+    val expressionAggEvalProjection = MutableProjection.create(evalExpressions, bufferAttributes)
+    expressionAggEvalProjection.target(aggregateResult)
+
+    val mergeExpressions =
+      aggregateFunctions.zip(
+        aggregatesRight.map(ae => (ae.mode, ae.isDistinct, ae.filter))).flatMap {
+        case (ae: DeclarativeAggregate, (mode, isDistinct, filter)) =>
+          mode match {
+            case Partial | Complete =>
+              if (filter.isDefined) {
+                ae.updateExpressions.zip(ae.aggBufferAttributes).map {
+                  case (updateExpr, attr) => If(filter.get, updateExpr, attr)
+                }
+              } else {
+                ae.updateExpressions
+              }
+            case PartialMerge | Final => ae.mergeExpressions
+          }
+        case (agg: AggregateFunction, _) => Seq.fill(agg.aggBufferAttributes.length)(NoOp)
+      }
+
+    val aggregationBufferSchema = aggregateFunctions.flatMap(_.aggBufferAttributes)
+    val updateProjection =
+      MutableProjection.create(mergeExpressions, aggregationBufferSchema
+        ++ left.output ++ right.output)
+
+    val joinedRow2 = new JoinedRow
+    val aggRow = new JoinedRow
 
     if (hashedRelation == EmptyHashedRelation) {
       Iterator.empty
-    } else if (hashedRelation.keyIsUnique) {
-//      streamIter.filter { current =>
-//        val key = joinKeys(current)
-//        lazy val matched = hashedRelation.getValue(key)
-//        !key.anyNull && matched != null &&
-//          (condition.isEmpty || boundCondition(joinedRow(current, matched)))
-//      }
-      streamIter.flatMap { srow =>
-        joinedRow.withLeft(srow)
-        val matches = hashedRelation.get(joinKeys(srow))
-        if (matches != null) {
-          //          logWarning("left row: " + srow)
-          val rightCountSum = matches.map(joinedRow.withRight).filter(boundCondition)
-            .map(row => {
-              //              logWarning("right row: " + row + ", value: " +
-              //                row.getRight.getLong(rightCountOrdinal))
-              row.getRight.getLong(rightCountOrdinal)
-            }).sum
-          //          logWarning("right count sum: " + rightCountSum)
-          val schema = StructType(StructField("c", LongType) :: Nil)
-          val sumRow = new SpecificInternalRow(schema)
-          //          logWarning("sumRow: " + sumRow)
-          val leftCount = srow.getLong(leftCountOrdinal)
-          //          logWarning("leftCount: " + leftCount)
-          sumRow.setLong(0, rightCountSum * leftCount)
-          //          logWarning("sumRow: " + sumRow)
-          joinedRow.withRight(sumRow)
-          //          logWarning("produced row: " + joinedRow)
-          Seq(joinedRow)
-        } else {
-          Seq.empty
-        }
-      }
     } else {
-//      streamIter.filter { current =>
-//        val key = joinKeys(current)
-//        lazy val buildIter = hashedRelation.get(key)
-//        !key.anyNull && buildIter != null && (condition.isEmpty || buildIter.exists {
-//          (row: InternalRow) => boundCondition(joinedRow(current, row))
-//        })
-//      }
-//      streamIter.foreach { current =>
-//        val key = joinKeys(current)
-//        lazy val buildIter = hashedRelation.get(key)
-//        !key.anyNull && buildIter != null && (condition.isEmpty || buildIter.exists {
-//          (row: InternalRow) => boundCondition(joinedRow(current, row))
-//        })
-//      }
       streamIter.flatMap { srow =>
         joinedRow.withLeft(srow)
         val matches = hashedRelation.get(joinKeys(srow))
+
+        var buffer: InternalRow = null
+
+        if (doAggregation) {
+          // Right now this is not really needed as we do not do grouping
+          val hashMap = new UnsafeFixedWidthAggregationMap(
+            initialAggregationBuffer,
+            StructType.fromAttributes(aggregateFunctions.flatMap(_.aggBufferAttributes)),
+            StructType.fromAttributes(groupRight.map(_.toAttribute)),
+            TaskContext.get(),
+            // 1024 * 16, // initial capacity
+            1,
+            TaskContext.get().taskMemoryManager().pageSizeBytes
+          )
+
+          val groupingProjection: UnsafeProjection =
+            UnsafeProjection.create(groupRight, right.output)
+
+          // No grouping - just get the same buffer each time
+          val groupingKey = groupingProjection.apply(null)
+
+          val bufferSchema = aggregateFunctions.flatMap(_.aggBufferAttributes)
+        }
+
         if (matches != null) {
-//          logWarning("left row: " + srow)
+          buffer = new SpecificInternalRow(aggregatesRight.map(_.dataType))
+          expressionAggInitialProjection.target(buffer)
           val rightCountSum = matches.map(joinedRow.withRight).filter(boundCondition)
             .map(row => {
-//              logWarning("right row: " + row + ", value: " +
-//                row.getRight.getLong(rightCountOrdinal))
+              if (doAggregation) {
+                updateProjection.target(buffer)(aggRow(buffer, row))
+              }
+              // Return right count
               row.getRight.getLong(rightCountOrdinal)
             }).sum
-//          logWarning("right count sum: " + rightCountSum)
           val schema = StructType(StructField("c", LongType) :: Nil)
           val sumRow = new SpecificInternalRow(schema)
-//          logWarning("sumRow: " + sumRow)
           val leftCount = srow.getLong(leftCountOrdinal)
-//          logWarning("leftCount: " + leftCount)
           sumRow.setLong(0, rightCountSum * leftCount)
-//          logWarning("sumRow: " + sumRow)
+          // withRight replaces the right part - now we have the left row + count
           joinedRow.withRight(sumRow)
-//          logWarning("produced row: " + joinedRow)
+          if (doAggregation) {
+            joinedRow.withRight(joinedRow2(sumRow, buffer))
+          }
           Seq(joinedRow)
         } else {
           Seq.empty
         }
       }
     }
+//
+//    if (hashedRelation == EmptyHashedRelation) {
+//      Iterator.empty
+//    } else if (hashedRelation.keyIsUnique) {
+//      streamIter.flatMap { srow =>
+//        joinedRow.withLeft(srow)
+//        val matches = hashedRelation.get(joinKeys(srow))
+//        if (matches != null) {
+//          //          logWarning("left row: " + srow)
+//          val rightCountSum = matches.map(joinedRow.withRight).filter(boundCondition)
+//            .map(row => {
+//              //              logWarning("right row: " + row + ", value: " +
+//              //                row.getRight.getLong(rightCountOrdinal))
+//              row.getRight.getLong(rightCountOrdinal)
+//            }).sum
+//          //          logWarning("right count sum: " + rightCountSum)
+//          val schema = StructType(StructField("c", LongType) :: Nil)
+//          val sumRow = new SpecificInternalRow(schema)
+//          //          logWarning("sumRow: " + sumRow)
+//          val leftCount = srow.getLong(leftCountOrdinal)
+//          //          logWarning("leftCount: " + leftCount)
+//          sumRow.setLong(0, rightCountSum * leftCount)
+//          //          logWarning("sumRow: " + sumRow)
+//          joinedRow.withRight(sumRow)
+//          //          logWarning("produced row: " + joinedRow)
+//          Seq(joinedRow)
+//        } else {
+//          Seq.empty
+//        }
+//      }
+//    } else {
+//      streamIter.flatMap { srow =>
+//        joinedRow.withLeft(srow)
+//        val matches = hashedRelation.get(joinKeys(srow))
+//        if (matches != null) {
+//          val rightCountSum = matches.map(joinedRow.withRight).filter(boundCondition)
+//            .map(row => {
+//              row.getRight.getLong(rightCountOrdinal)
+//            }).sum
+//          val schema = StructType(StructField("c", LongType) :: Nil)
+//          val sumRow = new SpecificInternalRow(schema)
+//          val leftCount = srow.getLong(leftCountOrdinal)
+//          sumRow.setLong(0, rightCountSum * leftCount)
+//          joinedRow.withRight(sumRow)
+//          Seq(joinedRow)
+//        } else {
+//          Seq.empty
+//        }
+//      }
+//    }
   }
 
   protected def join(
@@ -436,13 +509,15 @@ trait HashCountJoin extends JoinCodegenSupport {
       hashed: HashedRelation,
       numOutputRows: SQLMetric,
       countLeft: Option[Expression],
-      countRight: Option[Expression]): Iterator[InternalRow] = {
+      countRight: Option[Expression],
+      aggregatesRight: Seq[AggregateExpression],
+      groupRight: Seq[NamedExpression]): Iterator[InternalRow] = {
 
-    val joinedIter = countJoin(streamedIter, hashed, countLeft, countRight)
+    val joinedIter = countJoin(streamedIter, hashed, countLeft, countRight,
+      aggregatesRight, groupRight)
 
-    logWarning("left output: " + left.output)
-    logWarning("right output: " + right.output)
-    val output = left.output ++ Seq(countRight.get.references.head)
+    val output = left.output ++ Seq(countRight.get.references.head) ++
+      aggregatesRight.map(_.resultAttribute)
     logWarning("output: " + output)
 
     val resultProj = UnsafeProjection.create(output, output)

@@ -24,6 +24,7 @@ import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateExpression
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight, BuildSide}
 import org.apache.spark.sql.catalyst.plans._
@@ -47,6 +48,8 @@ case class BroadcastHashCountJoinExec(
     right: SparkPlan,
     countLeft: Option[Expression],
     countRight: Option[Expression],
+    aggregatesRight: Seq[AggregateExpression],
+    groupRight: Seq[NamedExpression],
     isNullAwareAntiJoin: Boolean = false)
   extends HashCountJoin {
 
@@ -71,7 +74,8 @@ case class BroadcastHashCountJoinExec(
     }
   }
 
-  override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.references.head)
+  override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.references.head) ++
+    aggregatesRight.map(_.resultAttribute)
 
   override lazy val outputPartitioning: Partitioning = {
     joinType match {
@@ -155,7 +159,8 @@ case class BroadcastHashCountJoinExec(
       streamedPlan.execute().mapPartitions { streamedIter =>
         val hashed = broadcastRelation.value.asReadOnlyCopy()
         TaskContext.get().taskMetrics().incPeakExecutionMemory(hashed.estimatedSize)
-        join(streamedIter, hashed, numOutputRows, countLeft, countRight)
+        join(streamedIter, hashed, numOutputRows, countLeft, countRight,
+          aggregatesRight, groupRight)
       }
     }
   }

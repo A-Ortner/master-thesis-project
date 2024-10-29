@@ -238,11 +238,12 @@ object ExtractCountJoinEquiJoinKeys extends Logging with PredicateHelper {
   type ReturnType =
     (JoinType, Seq[Expression], Seq[Expression],
       Option[Expression], Option[Expression], LogicalPlan, LogicalPlan,
-      Option[Expression], Option[Expression], JoinHint)
+      Option[Expression], Option[Expression], Seq[AggregateExpression],
+      Seq[NamedExpression], JoinHint)
 
   def unapply(join: CountJoin): Option[ReturnType] = join match {
     case CountJoin(left, right, joinType, condition, countLeft, countRight,
-    aggsRight, groupRight, hint) =>
+    aggregatesRight, groupRight, hint) =>
       logDebug(s"Considering join on: $condition")
       // Find equi-join predicates that can be evaluated before the join, and thus can be used
       // as join keys.
@@ -277,7 +278,8 @@ object ExtractCountJoinEquiJoinKeys extends Logging with PredicateHelper {
         val (leftKeys, rightKeys) = joinKeys.unzip
         logDebug(s"leftKeys:$leftKeys | rightKeys:$rightKeys")
         Some((joinType, leftKeys, rightKeys, otherPredicates.reduceOption(And),
-          predicatesOfJoinKeys.reduceOption(And), left, right, countLeft, countRight, hint))
+          predicatesOfJoinKeys.reduceOption(And), left, right, countLeft, countRight,
+          aggregatesRight, groupRight, hint))
       } else {
         None
       }

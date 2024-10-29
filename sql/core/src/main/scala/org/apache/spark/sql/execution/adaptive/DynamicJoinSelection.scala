@@ -179,7 +179,7 @@ object DynamicJoinSelection extends Rule[LogicalPlan] with JoinSelectionHelper {
       } else {
         j
       }
-    case j @ ExtractCountJoinEquiJoinKeys(_, _, _, _, _, _, _, _, _, hint) =>
+    case j @ ExtractCountJoinEquiJoinKeys(_, _, _, _, _, _, _, _, _, _, _, hint) =>
       var newHint = hint
       if (!hint.leftHint.exists(_.strategy.isDefined)) {
         selectCountJoinStrategy(j, true).foreach { strategy =>
