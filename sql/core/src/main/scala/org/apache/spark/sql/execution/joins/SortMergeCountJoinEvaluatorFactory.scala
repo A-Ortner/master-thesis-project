@@ -17,14 +17,16 @@
 
 package org.apache.spark.sql.execution.joins
 
-import org.apache.spark.{PartitionEvaluator, PartitionEvaluatorFactory, TaskContext}
+import scala.collection.mutable
+
+import org.apache.spark.{PartitionEvaluator, PartitionEvaluatorFactory}
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, GenericInternalRow, JoinedRow, Predicate, Projection, RowOrdering, SpecificInternalRow, UnsafeProjection}
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, AggregateFunction, Complete, DeclarativeAggregate, Final, NoOp, Partial, PartialMerge}
 import org.apache.spark.sql.catalyst.plans._
-import org.apache.spark.sql.execution.{RowIterator, SparkPlan, UnsafeFixedWidthAggregationMap}
+import org.apache.spark.sql.execution.{RowIterator, SparkPlan}
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
 
@@ -67,7 +69,7 @@ class SortMergeCountJoinEvaluatorFactory(
       val leftIter = inputs(0)
       val rightIter = inputs(1)
 
-//      logWarning("join output: " + output)
+     logWarning("join output: " + output)
 
       val boundCondition: InternalRow => Boolean = {
         condition.map { cond =>
@@ -87,6 +89,7 @@ class SortMergeCountJoinEvaluatorFactory(
         .indexOf(countRight.get.references.head.exprId)
 
       val doAggregation = aggregatesRight.nonEmpty
+      val doGrouping = groupRight.nonEmpty
 
       val aggregateFunctions = aggregatesRight.map(_.aggregateFunction).toArray
 
@@ -119,7 +122,6 @@ class SortMergeCountJoinEvaluatorFactory(
         aggregateFunctions.zip(
           aggregatesRight.map(ae => (ae.mode, ae.isDistinct, ae.filter))).flatMap {
           case (ae: DeclarativeAggregate, (mode, isDistinct, filter)) =>
-//            logWarning("mode: " + mode + ", agg: " + ae)
             mode match {
               case Partial | Complete =>
                 if (filter.isDefined) {
@@ -134,16 +136,22 @@ class SortMergeCountJoinEvaluatorFactory(
           case (agg: AggregateFunction, _) => Seq.fill(agg.aggBufferAttributes.length)(NoOp)
         }
 
-      // val aggregationBufferSchema = aggregateFunctions.flatMap(_.aggBufferAttributes)
       val aggregationBufferSchema = aggregateFunctions.flatMap(_.aggBufferAttributes)
-//      logWarning("aggregate functions: " + aggregateFunctions.mkString("Array(", ", ", ")"))
-//      logWarning("agg buffer schema: " + aggregationBufferSchema.mkString("Array(", ", ", ")"))
-//      logWarning("merge expressions: " + mergeExpressions.mkString("Array(", ", ", ")"))
       val updateProjection =
         MutableProjection.create(mergeExpressions, aggregationBufferSchema ++ right.output)
 
       val joinedRow2 = new JoinedRow
+      val joinedRow3 = new JoinedRow
       val aggRow = new JoinedRow
+
+      val sumRowSchema = StructType(StructField("c", LongType) :: Nil)
+      val groupingProjection: UnsafeProjection =
+        UnsafeProjection.create(groupRight, right.output)
+
+      logWarning("agregate functions: " + aggregateFunctions.mkString("Array(", ", ", ")"))
+      logWarning("groupRight: " + groupRight)
+      logWarning("right output: " + right.output)
+      logWarning("left output: " + left.output)
 
       joinType match {
         // TODO remove other join types as they get ignored in the countjoin
@@ -163,87 +171,112 @@ class SortMergeCountJoinEvaluatorFactory(
             private[this] val joinRow = new JoinedRow
 
             var rightCountSum = 0L
-
             var buffer: InternalRow = null
-
-            if (doAggregation) {
-              // Right now this is not really needed as we do not do grouping
-              val hashMap = new UnsafeFixedWidthAggregationMap(
-                initialAggregationBuffer,
-                StructType.fromAttributes(aggregateFunctions.flatMap(_.aggBufferAttributes)),
-                StructType.fromAttributes(groupRight.map(_.toAttribute)),
-                TaskContext.get(),
-                // 1024 * 16, // initial capacity
-                1,
-                TaskContext.get().taskMemoryManager().pageSizeBytes
-              )
-
-              val groupingProjection: UnsafeProjection =
-                UnsafeProjection.create(groupRight, right.output)
-
-              // No grouping - just get the same buffer each time
-              val groupingKey = groupingProjection.apply(null)
-              // buffer = hashMap.getAggregationBufferFromUnsafeRow(groupingKey)
-              //  .asInstanceOf[InternalRow]
-
-              // buffer = new GenericInternalRow(aggregationBufferSchema.length)
-              // buffer = new SpecificInternalRow(aggregatesRight.map(_.dataType))
-              val bufferSchema = aggregateFunctions.flatMap(_.aggBufferAttributes)
-//              buffer = InterpretedSafeProjection.createProjection(bufferSchema)
-//                .apply(new GenericInternalRow(bufferSchema.length))
-
-            }
+            var sumMap: mutable.LinkedHashMap[UnsafeRow, Long] = null
+            var bufferIterator: Iterator[(UnsafeRow, InternalRow)] = null
 
             override def advanceNext(): Boolean = {
-              // logWarning("aggregate functions: " + aggregateFunctions.map(_.sql(false)))
-
-              // Create new buffer
-              buffer = new SpecificInternalRow(aggregatesRight.map(_.dataType))
-              expressionAggInitialProjection.target(buffer)
-
-              while (smjScanner.findNextInnerJoinRows()) {
-
-                val currentRightMatches = smjScanner.getBufferedMatches
-                currentLeftRow = smjScanner.getStreamedRow
-
-                if (currentRightMatches != null && currentRightMatches.length > 0) {
-                  val rightMatchesIterator = currentRightMatches.generateIterator()
-
-                  rightCountSum = 0L
-                  while (rightMatchesIterator.hasNext) {
-                    val rightRow = rightMatchesIterator.next()
-                    joinRow(currentLeftRow, rightRow)
-                    if (boundCondition(joinRow)) {
-                      rightCountSum += joinRow.getRight.getLong(rightCountOrdinal)
-                      if (doAggregation) {
-//                        logWarning("buffer: " + buffer)
-//                        logWarning("joinRow: " + joinRow)
-                        aggRow(buffer, rightRow)
-
-                        // logWarning("updateProjection: " + updateProjection)
-//                        logWarning("aggRow: " + aggRow)
-                        updateProjection.target(buffer)(aggRow)
-//                        logWarning("new buffer: " + buffer)
-                      }
-                      numOutputRows += 1
-                    }
-                  }
-                  return true
-                }
+              if (bufferIterator != null && bufferIterator.hasNext) {
+                // If there are still rows in the iterator, return true, such that
+                // these rows are fetched
+                true
               }
-              false
+              else {
+                sumMap = new mutable.LinkedHashMap[UnsafeRow, Long]
+
+                while (smjScanner.findNextInnerJoinRows()) {
+                  currentLeftRow = smjScanner.getStreamedRow
+                  val currentRightMatches = smjScanner.getBufferedMatches
+
+                  if (currentRightMatches != null && currentRightMatches.length > 0) {
+                    val bufferMap = new mutable.LinkedHashMap[UnsafeRow, InternalRow]
+                    if (!doGrouping) {
+                      // In case we do not group, create one buffer and use it for all right matches
+                      buffer = new SpecificInternalRow(aggregatesRight.map(_.dataType))
+                      expressionAggInitialProjection.target(buffer)
+                    }
+
+                    val rightMatchesIterator = currentRightMatches.generateIterator()
+
+                    rightCountSum = 0L
+                    while (rightMatchesIterator.hasNext) {
+                      val rightRow = rightMatchesIterator.next()
+                      joinRow(currentLeftRow, rightRow)
+                      if (boundCondition(joinRow)) {
+                        val rightCount = joinRow.getRight.getLong(rightCountOrdinal)
+                        rightCountSum += rightCount
+                        if (doAggregation) {
+                          if (doGrouping) {
+                            val groupingKey = groupingProjection.apply(rightRow)
+                            var sum: Long = 0
+
+                            if (bufferMap.contains(groupingKey)) {
+                              buffer = bufferMap(groupingKey)
+                              sum = sumMap(groupingKey)
+                              sum += rightCount
+                              sumMap.put(groupingKey, sum)
+                            }
+                            else {
+                              // Initialize a new buffer
+                              buffer = new SpecificInternalRow(aggregatesRight.map(_.dataType))
+                              expressionAggInitialProjection.target(buffer)
+                              bufferMap.put(groupingKey, buffer)
+                              sum = rightCount
+                              sumMap.put(groupingKey, sum)
+                            }
+                          }
+
+                          aggRow(buffer, rightRow)
+                          updateProjection.target(buffer)(aggRow)
+                        }
+                        numOutputRows += 1
+                      }
+                    }
+                    if (doGrouping) {
+                      logWarning("setting buffer iterator: " + bufferMap)
+                      bufferIterator = bufferMap.iterator
+                    }
+                    return true
+                  }
+                }
+                false
+              }
             }
 
             override def getRow: InternalRow = {
-              val schema = StructType(StructField("c", LongType) :: Nil)
-              val sumRow = new SpecificInternalRow(schema)
-              val leftCount = currentLeftRow.getLong(leftCountOrdinal)
-              sumRow.setLong(0, rightCountSum * leftCount)
-              if (doAggregation) {
-                joinRow.withRight(joinedRow2(sumRow, buffer))
+              logWarning("getRow (doaggregation = " + doAggregation +
+                ", dogrouping = " + doGrouping)
+              logWarning("partition: " + partitionIndex)
+              logWarning("currentLeftRow: " + currentLeftRow)
+              logWarning("rightCountSum: " + rightCountSum)
+              if (doGrouping) {
+                val (groupingKey, buf) = bufferIterator.next()
+                logWarning("grouping key: " + groupingKey + ", buffer: " + buf)
+                val sum = sumMap(groupingKey)
+
+                val sumRow = new SpecificInternalRow(sumRowSchema)
+                val leftCount = currentLeftRow.getLong(leftCountOrdinal)
+                sumRow.setLong(0, sum * leftCount)
+
+                joinRow.withRight(joinedRow2(sumRow, joinedRow3(buf, groupingKey)))
+                logWarning("output: " + joinRow)
+                joinRow
               }
               else {
-                joinRow.withRight(sumRow)
+                logWarning("no grouping buffer: " + buffer)
+                val sumRow = new SpecificInternalRow(sumRowSchema)
+                val leftCount = currentLeftRow.getLong(leftCountOrdinal)
+                sumRow.setLong(0, rightCountSum * leftCount)
+                if (doAggregation) {
+                  joinRow.withRight(joinedRow2(sumRow, buffer))
+                  logWarning("output: " + joinRow)
+                  joinRow
+                }
+                else {
+                  joinRow.withRight(sumRow)
+                  logWarning("output: " + joinRow)
+                  joinRow
+                }
               }
             }
           }.toScala

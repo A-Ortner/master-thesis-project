@@ -75,7 +75,7 @@ case class BroadcastHashCountJoinExec(
   }
 
   override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.references.head) ++
-    aggregatesRight.map(_.resultAttribute)
+    aggregatesRight.map(_.resultAttribute) ++ groupRight.map(_.toAttribute)
 
   override lazy val outputPartitioning: Partitioning = {
     joinType match {

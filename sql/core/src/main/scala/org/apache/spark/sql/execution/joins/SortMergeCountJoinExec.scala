@@ -53,7 +53,7 @@ case class SortMergeCountJoinExec(
     "spillSize" -> SQLMetrics.createSizeMetric(sparkContext, "spill size"))
 
   override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.references.head) ++
-    aggregatesRight.map(_.resultAttribute)
+    aggregatesRight.map(_.resultAttribute) ++ groupRight.map(_.toAttribute)
 
   override def outputPartitioning: Partitioning = left.outputPartitioning
   override def outputOrdering: Seq[SortOrder] = joinType match {

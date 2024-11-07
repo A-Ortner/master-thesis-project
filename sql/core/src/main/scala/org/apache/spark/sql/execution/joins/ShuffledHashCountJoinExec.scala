@@ -57,7 +57,7 @@ case class ShuffledHashCountJoinExec(
 
   // override def output: Seq[Attribute] = super[ShuffledJoin].output
   override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.references.head) ++
-    aggregatesRight.map(_.resultAttribute)
+    aggregatesRight.map(_.resultAttribute) ++ groupRight.map(_.toAttribute)
 
   override def outputPartitioning: Partitioning = super[ShuffledJoin].outputPartitioning
 
@@ -111,12 +111,6 @@ case class ShuffledHashCountJoinExec(
     streamedPlan.execute().zipPartitions(buildPlan.execute()) { (streamIter, buildIter) =>
       val hashed = buildHashedRelation(buildIter)
       joinType match {
-//        case FullOuter => buildSideOrFullOuterJoin(streamIter, hashed, numOutputRows,
-//          isFullOuterJoin = true)
-//        case LeftOuter if buildSide.equals(BuildLeft) =>
-//          buildSideOrFullOuterJoin(streamIter, hashed, numOutputRows, isFullOuterJoin = false)
-//        case RightOuter if buildSide.equals(BuildRight) =>
-//          buildSideOrFullOuterJoin(streamIter, hashed, numOutputRows, isFullOuterJoin = false)
         case _ => join(streamIter, hashed, numOutputRows, countLeft, countRight,
           aggregatesRight, groupRight)
       }

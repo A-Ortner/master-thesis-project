@@ -712,9 +712,8 @@ case class CountJoin(
         left.output.map(_.withNullability(true)) ++ right.output.map(_.withNullability(true))
       case _ =>
         // Standard CountJoin case
-        // left.output ++ right.output ++ aggregatesRight.map(_.resultAttribute)
          left.output ++ Seq(countRight.get.references.head) ++
-           aggregatesRight.map(_.resultAttribute)
+           aggregatesRight.map(_.resultAttribute) ++ groupRight.map(_.toAttribute)
     }
   }
 
