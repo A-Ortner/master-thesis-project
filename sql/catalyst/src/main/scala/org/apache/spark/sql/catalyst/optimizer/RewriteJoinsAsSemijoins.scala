@@ -81,8 +81,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
     val groupingExpressions = namedGroupingExpressions.map(_._2)
     val groupExpressionMap = namedGroupingExpressions.toMap
 
-    logWarning("grouping expressions " + namedGroupingExpressions)
-    logWarning("aggregate expressions " + aggregateExpressions)
+//    logWarning("grouping expressions " + namedGroupingExpressions)
+//    logWarning("aggregate expressions " + aggregateExpressions)
 
     val aggregateAttributes = resultExpressions.map(expr => expr.references)
       .reduce((a1, a2) => a1 ++ a2)
@@ -129,8 +129,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
       agg
     }
     else {
-      logWarning("group attributes: " + groupAttributes)
-      logWarning("counting aggregates: " + countingAggregates)
+//      logWarning("group attributes: " + groupAttributes)
+//      logWarning("counting aggregates: " + countingAggregates)
 
       val allAggAttributes = aggregateAttributes ++ groupAttributes
       val hg = new Hypergraph(items, conditions)
@@ -172,8 +172,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
           var projectList: mutable.MutableList[NamedExpression] =
             new mutable.MutableList[NamedExpression]
 
-          logWarning("lastAggMap: " + lastAggMap)
-          logWarning("lastSumMap: " + lastSumMap)
+//          logWarning("lastAggMap: " + lastAggMap)
+//          logWarning("lastSumMap: " + lastSumMap)
 
           val rewrittenResultExpressions = resultExpressions.map { expr =>
             expr.transformDown {
@@ -185,7 +185,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                     val resultAtt = equivalentAggregateExpressions.getExprState(ae).map(_.expr)
                       .getOrElse(ae).asInstanceOf[AggregateExpression].resultAttribute
 
-                    logWarning("resultAtt: " + resultAtt)
+//                    logWarning("resultAtt: " + resultAtt)
 
                     a match {
                       case Sum(_, _) =>
@@ -233,7 +233,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                 }.getOrElse(expression)
             }.asInstanceOf[NamedExpression]
           }
-          logWarning("rewritten result expressions: " + rewrittenResultExpressions)
+//          logWarning("rewritten result expressions: " + rewrittenResultExpressions)
 
           projectList ++= groupingExpressions
 
@@ -731,7 +731,7 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
         var multiplySumExpressions = new mutable.MutableList[NamedExpression]()
         var rightMultiplySumExpressions = new mutable.MutableList[NamedExpression]()
 
-        logWarning("lastSumMap: " + lastSumMap)
+//        logWarning("lastSumMap: " + lastSumMap)
 
         aggExpressions.foreach(agg => {
           agg.aggregateFunction match {
@@ -782,6 +782,7 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
                 // SUM aggregate has not yet occurred somewhere in the tree -
                 // check if it starts here
                 if (agg.references.subsetOf(rightPlan.outputSet)) {
+
                   // logWarning("is subset")
                   //         |
                   //       Project(ac<-ac*Y.c)
@@ -803,8 +804,10 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
 
                   applicableAggExpressions = applicableAggExpressions :+ newAgg
 
-                  val newAgg2 = Alias(Multiply(leftCountAttribute,
-                    Cast(newAgg.resultAttribute, leftCountAttribute.dataType)), "sum")()
+//                  val newAgg2 = Alias(Multiply(leftCountAttribute,
+//                    Cast(newAgg.resultAttribute, leftCountAttribute.dataType)), "sum")()
+                  val newAgg2 = Alias(Multiply(newAgg.resultAttribute,
+                    Cast(leftCountAttribute, newAgg.resultAttribute.dataType)), "sum")()
                   multiplySumExpressions = multiplySumExpressions :+ newAgg2
 
                   lastSumMap.put(agg.resultAttribute, newAgg2.toAttribute)
@@ -837,12 +840,12 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
               }
           }
         })
-        logWarning("applicable agg expressions: " + applicableAggExpressions)
+//        logWarning("applicable agg expressions: " + applicableAggExpressions)
 
         val applicableGroupAttributes = groupingExpressions.filter(
           groupExpr => {groupExpr.references.subsetOf(rightPlan.outputSet)}
         )
-        logWarning("applicable group atts: " + applicableGroupAttributes)
+//        logWarning("applicable group atts: " + applicableGroupAttributes)
 
         val right = if (rightMultiplySumExpressions.isEmpty) {
           rightPlan
@@ -882,7 +885,7 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
             rightCountAttribute), "c")()
         }
       }
-      logWarning("join output: " + join.output)
+//      logWarning("join output: " + join.output)
       val finalProjection = join
 
       prevPlan = finalProjection

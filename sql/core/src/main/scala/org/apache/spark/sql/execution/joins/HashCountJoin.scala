@@ -336,7 +336,7 @@ trait HashCountJoin extends JoinCodegenSupport {
     val joinKeys = streamSideKeyGenerator()
     val joinedRow = new JoinedRow
 
-    logWarning("join output: " + output)
+//    logWarning("join output: " + output)
 
     val leftCountOrdinal = AttributeSeq(streamedOutput)
       .indexOf(countLeft.get.references.head.exprId)
@@ -357,20 +357,19 @@ trait HashCountJoin extends JoinCodegenSupport {
     }
 
     val bufferSchema = aggregateFunctions.flatMap(_.aggBufferAttributes)
-    val initialAggregationBuffer: UnsafeRow =
-      UnsafeProjection.create(bufferSchema.map(_.dataType))
-      .apply(new GenericInternalRow(bufferSchema.length))
-    // Initialize declarative aggregates' buffer values
-    expressionAggInitialProjection.target(initialAggregationBuffer)(EmptyRow)
+//    val initialAggregationBuffer: UnsafeRow =
+//      UnsafeProjection.create(bufferSchema.map(_.dataType))
+//      .apply(new GenericInternalRow(bufferSchema.length))
+//    // Initialize declarative aggregates' buffer values
+//    expressionAggInitialProjection.target(initialAggregationBuffer)(EmptyRow)
 
     val evalExpressions = aggregateFunctions.map {
       case ae: DeclarativeAggregate => ae.evaluateExpression
       case agg: AggregateFunction => NoOp
     }
 
-    val bufferAttributes = aggregateFunctions.flatMap(_.aggBufferAttributes)
     val aggregateResult = new SpecificInternalRow(aggregatesRight.map(_.dataType))
-    val expressionAggEvalProjection = MutableProjection.create(evalExpressions, bufferAttributes)
+    val expressionAggEvalProjection = MutableProjection.create(evalExpressions, bufferSchema)
     expressionAggEvalProjection.target(aggregateResult)
 
     val mergeExpressions =
@@ -391,10 +390,9 @@ trait HashCountJoin extends JoinCodegenSupport {
         case (agg: AggregateFunction, _) => Seq.fill(agg.aggBufferAttributes.length)(NoOp)
       }
 
-    val aggregationBufferSchema = aggregateFunctions.flatMap(_.aggBufferAttributes)
     val updateProjection =
-      MutableProjection.create(mergeExpressions, aggregationBufferSchema
-        ++ left.output ++ right.output)
+      MutableProjection.create(mergeExpressions, bufferSchema
+        ++ right.output)
 
     val joinedRow2 = new JoinedRow
     val joinedRow3 = new JoinedRow
@@ -402,7 +400,30 @@ trait HashCountJoin extends JoinCodegenSupport {
 
     val sumRowSchema = StructType(StructField("c", LongType) :: Nil)
     val groupingProjection: UnsafeProjection =
-      UnsafeProjection.create(groupRight, left.output ++ right.output)
+      UnsafeProjection.create(groupRight, right.output)
+
+    val aggResultAttributes = aggregatesRight.map(_.resultAttribute)
+
+    val aggProjection = UnsafeProjection.create(
+      aggResultAttributes ++ groupRight,
+      aggResultAttributes ++ groupRight.map(_.toAttribute))
+
+    val countAggGroupProjection = UnsafeProjection.create(
+      Seq(countRight.get) ++ aggResultAttributes ++ groupRight,
+      Seq(countRight.get.asInstanceOf[Attribute])
+        ++ aggResultAttributes ++ groupRight.map(_.toAttribute))
+
+    val resultProjection = UnsafeProjection.create(
+      left.output ++ Seq(countRight.get) ++ aggResultAttributes ++ groupRight,
+      left.output ++ Seq(countRight.get.asInstanceOf[Attribute])
+        ++ aggResultAttributes ++ groupRight.map(_.toAttribute))
+
+    logWarning("agg buffer atts: " + bufferSchema.mkString("Array(", ", ", ")"))
+    logWarning("agg results: " + aggResultAttributes)
+    logWarning("evaluate expressions: " + evalExpressions.mkString("Array(", ", ", ")"))
+    logWarning("output types: " + (left.output ++
+      Seq(countRight.get.asInstanceOf[Attribute])
+      ++ aggResultAttributes ++ groupRight.map(_.toAttribute)).map(_.dataType))
 
     if (hashedRelation == EmptyHashedRelation) {
       Iterator.empty
@@ -420,16 +441,17 @@ trait HashCountJoin extends JoinCodegenSupport {
           val leftCount = srow.getLong(leftCountOrdinal)
           if (!doGrouping) {
             // In case we do not group, create one buffer and use it for all right matches
-            buffer = new SpecificInternalRow(aggregatesRight.map(_.dataType))
-            expressionAggInitialProjection.target(buffer)
+            buffer = new SpecificInternalRow(bufferSchema.map(_.dataType))
+            expressionAggInitialProjection.target(buffer)(EmptyRow)
           }
-          logWarning("buffermap before: " + bufferMap)
-          val rightCountSum = matches.map(joinedRow.withRight).filter(boundCondition)
+//          logWarning("buffermap before: " + bufferMap)
+          val rightCountSum = matches.map(joinedRow.withRight)
+            .filter(boundCondition)
             .map(row => {
               val rightCount = row.getRight.getLong(rightCountOrdinal)
               if (doAggregation) {
                 if (doGrouping) {
-                  val groupingKey = groupingProjection.apply(row)
+                  val groupingKey = groupingProjection(row.getRight).copy()
                   var sum: Long = 0
                   if (bufferMap.contains(groupingKey)) {
                     buffer = bufferMap(groupingKey)
@@ -438,46 +460,51 @@ trait HashCountJoin extends JoinCodegenSupport {
                     sumMap.put(groupingKey, sum)
                   }
                   else {
-                    buffer = new SpecificInternalRow(aggregatesRight.map(_.dataType))
-                    expressionAggInitialProjection.target(buffer)
+                    buffer = new SpecificInternalRow(bufferSchema.map(_.dataType))
+                    expressionAggInitialProjection.target(buffer)(EmptyRow)
                     bufferMap.put(groupingKey, buffer)
                     sum = rightCount
                     sumMap.put(groupingKey, sum)
                   }
                 }
 
-                aggRow(buffer, row)
-                logWarning("aggRow: " + aggRow + ", buffer: " + buffer)
+                aggRow(buffer, row.getRight)
+//                logWarning("aggRow: " + aggRow + ", buffer: " + buffer)
                 updateProjection.target(buffer)(aggRow)
-                logWarning("buffer after projection: " + buffer)
-                logWarning("buffer fields: " + buffer.numFields)
+//                logWarning("buffer after projection: " + buffer)
               }
               // Return right count
               rightCount
-            }).sum
+            }
+          ).sum
 
-          logWarning("buffermap after: " + bufferMap)
+//          logWarning("buffermap after: " + bufferMap)
           if (doGrouping) {
             (bufferMap map {
             case (groupingKey: UnsafeRow, buf: InternalRow) =>
               val sumRow = new SpecificInternalRow(sumRowSchema)
               sumRow.setLong(0, sumMap(groupingKey) * leftCount)
+              expressionAggEvalProjection(buf)
 
-              joinedRow.withRight(joinedRow2(sumRow, joinedRow3(buf, groupingKey)))
-                logWarning("produced row: " + joinedRow)
-                joinedRow
+              val aggResult = aggProjection(joinedRow3(aggregateResult, groupingKey))
+              joinedRow.withRight(countAggGroupProjection(joinedRow2(sumRow, aggResult)))
+//                logWarning("produced row: " + resultProjection(joinedRow))
+              resultProjection(joinedRow)
             }).toSeq
           }
           else {
             val sumRow = new SpecificInternalRow(sumRowSchema)
             sumRow.setLong(0, rightCountSum * leftCount)
             // withRight replaces the right part - now we have the left row + count
-            joinedRow.withRight(sumRow)
             if (doAggregation) {
-              joinedRow.withRight(joinedRow2(sumRow, buffer))
+              expressionAggEvalProjection(buffer)
+              joinedRow.withRight(countAggGroupProjection(joinedRow2(sumRow, aggregateResult)))
             }
-            logWarning("produced row: " + joinedRow)
-            Seq(joinedRow)
+            else {
+              joinedRow.withRight(sumRow)
+            }
+//            logWarning("produced row: " + resultProjection(joinedRow))
+            Seq(resultProjection(joinedRow))
           }
         } else {
           Seq.empty
