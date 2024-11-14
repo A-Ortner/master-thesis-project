@@ -108,6 +108,20 @@ class SortMergeCountJoinEvaluatorFactory(
       // Initialize declarative aggregates' buffer values
       expressionAggInitialProjection.target(initialAggregationBuffer)(EmptyRow)
 
+      val useUnsafeBuffer = bufferSchema
+        .map(_.dataType).forall(UnsafeRow.isMutable)
+      val unsafeProjection =
+        UnsafeProjection.create(bufferSchema.map(_.dataType))
+
+      def newBuffer(): InternalRow = {
+        val bufferRow = new SpecificInternalRow(bufferSchema.map(_.dataType))
+        if (useUnsafeBuffer) {
+          unsafeProjection.apply(bufferRow)
+        } else {
+          bufferRow
+        }
+      }
+
       val evalExpressions = aggregateFunctions.map {
         case ae: DeclarativeAggregate => ae.evaluateExpression
         case agg: AggregateFunction => NoOp
@@ -194,7 +208,7 @@ class SortMergeCountJoinEvaluatorFactory(
                     val bufferMap = new java.util.LinkedHashMap[UnsafeRow, InternalRow]
                     if (!doGrouping) {
                       // In case we do not group, create one buffer and use it for all right matches
-                      buffer = new SpecificInternalRow(bufferSchema.map(_.dataType))
+                      buffer = newBuffer()
                       expressionAggInitialProjection.target(buffer)(EmptyRow)
                     }
 
@@ -229,11 +243,10 @@ class SortMergeCountJoinEvaluatorFactory(
 //                              logWarning("aggregates: " + aggregatesRight)
 //                              logWarning("bufferSchema: " +
 //                                bufferSchema.mkString("Array(", ", ", ")"))
-                              val useUnsafeBuffer = bufferSchema
-                                .map(_.dataType).forall(UnsafeRow.isMutable)
 //                              logWarning("useUnsafeBuffer: " + useUnsafeBuffer)
                               // buffer = new SpecificInternalRow(aggregatesRight.map(_.dataType))
-                              buffer = new SpecificInternalRow(bufferSchema.map(_.dataType))
+                              val bufferRow = new SpecificInternalRow(bufferSchema.map(_.dataType))
+                              buffer = newBuffer()
 //                              logWarning("new buffer: " + buffer)
                               expressionAggInitialProjection.target(buffer)(EmptyRow)
 //                              logWarning("buffer after projection: " + buffer +

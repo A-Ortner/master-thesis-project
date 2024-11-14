@@ -357,11 +357,21 @@ trait HashCountJoin extends JoinCodegenSupport {
     }
 
     val bufferSchema = aggregateFunctions.flatMap(_.aggBufferAttributes)
-//    val initialAggregationBuffer: UnsafeRow =
-//      UnsafeProjection.create(bufferSchema.map(_.dataType))
-//      .apply(new GenericInternalRow(bufferSchema.length))
-//    // Initialize declarative aggregates' buffer values
-//    expressionAggInitialProjection.target(initialAggregationBuffer)(EmptyRow)
+
+    val useUnsafeBuffer = bufferSchema
+      .map(_.dataType).forall(UnsafeRow.isMutable)
+    val unsafeProjection =
+      UnsafeProjection.create(bufferSchema.map(_.dataType))
+
+    def newBuffer(): InternalRow = {
+      val bufferRow = new SpecificInternalRow(bufferSchema.map(_.dataType))
+      if (useUnsafeBuffer) {
+        unsafeProjection.apply(bufferRow)
+      } else {
+        bufferRow
+      }
+    }
+
 
     val evalExpressions = aggregateFunctions.map {
       case ae: DeclarativeAggregate => ae.evaluateExpression
@@ -441,7 +451,7 @@ trait HashCountJoin extends JoinCodegenSupport {
           val leftCount = srow.getLong(leftCountOrdinal)
           if (!doGrouping) {
             // In case we do not group, create one buffer and use it for all right matches
-            buffer = new SpecificInternalRow(bufferSchema.map(_.dataType))
+            buffer = newBuffer()
             expressionAggInitialProjection.target(buffer)(EmptyRow)
           }
 //          logWarning("buffermap before: " + bufferMap)
@@ -460,7 +470,7 @@ trait HashCountJoin extends JoinCodegenSupport {
                     sumMap.put(groupingKey, sum)
                   }
                   else {
-                    buffer = new SpecificInternalRow(bufferSchema.map(_.dataType))
+                    buffer = newBuffer()
                     expressionAggInitialProjection.target(buffer)(EmptyRow)
                     bufferMap.put(groupingKey, buffer)
                     sum = rightCount

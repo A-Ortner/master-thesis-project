@@ -40,12 +40,11 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                   join: Join, keyRefs: Seq[Seq[Expression]],
                   uniqueConstraints: Seq[Seq[Expression]]) : LogicalPlan = {
     val startTime = System.nanoTime()
-    logTrace("applying yannakakis rewriting to join: " + agg)
+    logTrace("applying rewriting to join: " + agg)
     // Extract the join items (including any filters, etc.)
     val (items, conditions) = extractInnerJoins(join)
 
     val equivalentAggregateExpressions = new EquivalentExpressions
-
     // Extract the AggregateExpressions from the result expressions
     // e.g., SUM(x) from SUM(x) + 1
     val aggregateExpressions = resultExpressions.flatMap { expr =>
@@ -59,15 +58,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
     // Maps the resultAttribute of the first AggregateExpression to the resulAttribute of
     // the last one. This is needed for constructing the final rewritten result exprs
     val lastAggMap = new mutable.HashMap[Attribute, AggregateExpression]()
-
     // We store the last sum, when a sum aggregate is propagated upwards
     val lastSumMap = new mutable.HashMap[Attribute, Attribute]()
-
-//    aggregateExpressions.foreach(expr => {
-//      lastAggMap.put(expr.resultAttribute, expr)
-//    })
-
-    // val lastAggregateMap = new mutable.HashMap[Attribute, AggregateExpression]
 
     val namedGroupingExpressions = unnamedGroupingExpressions.map {
       case ne: NamedExpression => ne -> ne
@@ -80,14 +72,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
     }
     val groupingExpressions = namedGroupingExpressions.map(_._2)
     val groupExpressionMap = namedGroupingExpressions.toMap
-
-//    logWarning("grouping expressions " + namedGroupingExpressions)
-//    logWarning("aggregate expressions " + aggregateExpressions)
-
     val aggregateAttributes = resultExpressions.map(expr => expr.references)
       .reduce((a1, a2) => a1 ++ a2)
-//    logWarning("aggregate attributes: " + aggregateAttributes)
-//    logWarning("groupingExpressions: " + groupingExpressions)
     val groupAttributes = if (groupingExpressions.isEmpty) {
       AttributeSet.empty
     }
@@ -132,7 +118,6 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
 //      logWarning("group attributes: " + groupAttributes)
 //      logWarning("counting aggregates: " + countingAggregates)
 
-      val allAggAttributes = aggregateAttributes ++ groupAttributes
       val hg = new Hypergraph(items, conditions)
 //      logWarning("hypergraph:\n" + hg.toString)
       val jointree = hg.flatGYO
@@ -145,10 +130,11 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
       else {
         logWarning("join tree: \n" + jointree)
         // First check if there is a single tree node, i.e., relation that contains all attributes
-        // contained in the GROUP BY clause
-        val nodeContainingAttributes = jointree.findNodeContainingAttributes(allAggAttributes)
-        if (nodeContainingAttributes == null) {
-          logTrace("query is not 0MA")
+        // contained in the GROUP BY clause and agg expressions
+        val nodeContainingAllAttributes = jointree
+          .findNodeContainingAttributes(aggregateAttributes ++ groupAttributes)
+        if (nodeContainingAllAttributes == null) {
+          logTrace("there is no node containing all agg and group attributes")
           logWarning("time difference: " + (System.nanoTime() - startTime))
 
           var root = jointree
@@ -254,8 +240,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
           newAgg
         }
         else {
-          val root = nodeContainingAttributes.reroot
-//          logTrace("rerooted tree: \n" + root)
+          val root = nodeContainingAllAttributes.reroot
 
           if (countingAggregates.isEmpty
             && percentileAggregates.isEmpty
@@ -754,6 +739,7 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
 
                   val newAgg2 = Alias(Multiply(newAgg.resultAttribute,
                     Cast(leftCountAttribute, newAgg.resultAttribute.dataType)), "sum")()
+
                   multiplySumExpressions = multiplySumExpressions :+ newAgg2
 
                   lastSumMap.put(agg.resultAttribute, newAgg2.toAttribute)
@@ -769,7 +755,9 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
                   //
 
                   val newCount = Alias(Multiply(lastSumAtt,
-                    Cast(rightCountAttribute, lastSumAtt.dataType)), "sum")()
+                    Divide(Cast(rightCountAttribute, lastSumAtt.dataType),
+                      Cast(leftCountAttribute, lastSumAtt.dataType))), "sum")()
+
                   multiplySumExpressions = multiplySumExpressions :+ newCount
                   lastSumMap.put(agg.resultAttribute, newCount.toAttribute)
                 }
@@ -793,13 +781,20 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
                   //    /        \
                   //  Y(c)        Z(a,c)
 
-                  val intermediateSum = Alias(Multiply(sumExpression,
-                    Cast(rightCountAttribute, sumExpression.dataType)), "rsum")()
+//                  val intermediateSum = Alias(Multiply(sumExpression,
+//                    Cast(rightCountAttribute, sumExpression.dataType)), "rsum")()
+//
+//                  rightMultiplySumExpressions = rightMultiplySumExpressions :+ intermediateSum
+//
+//                  val newAgg = agg.transformDown {
+//                    case a: AggregateFunction =>
+//                                      a.withNewChildren(Seq(intermediateSum.toAttribute))
+//                  }.asInstanceOf[AggregateExpression]
 
-                  rightMultiplySumExpressions = rightMultiplySumExpressions :+ intermediateSum
-
-                  val newAgg = agg.transformDown {
-                    case a: AggregateFunction => a.withNewChildren(Seq(intermediateSum.toAttribute))
+                  val newAgg = agg.transformUp {
+                    case a: AggregateFunction =>
+                      a.withNewChildren(Seq(Multiply(a.children.head,
+                        Cast(rightCountAttribute, a.children.head.dataType))))
                   }.asInstanceOf[AggregateExpression]
 
                   applicableAggExpressions = applicableAggExpressions :+ newAgg
