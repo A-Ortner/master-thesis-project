@@ -238,7 +238,7 @@ object ExtractCountJoinEquiJoinKeys extends Logging with PredicateHelper {
   type ReturnType =
     (JoinType, Seq[Expression], Seq[Expression],
       Option[Expression], Option[Expression], LogicalPlan, LogicalPlan,
-      Option[Expression], Option[Expression], Seq[AggregateExpression],
+      Option[Expression], Option[NamedExpression], Seq[AggregateExpression],
       Seq[NamedExpression], JoinHint)
 
   def unapply(join: CountJoin): Option[ReturnType] = join match {

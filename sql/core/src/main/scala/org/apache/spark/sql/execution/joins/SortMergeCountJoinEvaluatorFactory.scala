@@ -38,7 +38,7 @@ class SortMergeCountJoinEvaluatorFactory(
     left: SparkPlan,
     right: SparkPlan,
     countLeft: Option[Expression],
-    countRight: Option[Expression],
+    countRight: Option[NamedExpression],
     aggregatesRight: Seq[AggregateExpression],
     groupRight: Seq[NamedExpression],
     output: Seq[Attribute],
@@ -83,10 +83,20 @@ class SortMergeCountJoinEvaluatorFactory(
       val keyOrdering = RowOrdering.createNaturalAscendingOrdering(leftKeys.map(_.dataType))
       val resultProj: InternalRow => InternalRow = UnsafeProjection.create(output, output)
 
-      val leftCountOrdinal = AttributeSeq(left.output)
-        .indexOf(countLeft.get.references.head.exprId)
-      val rightCountOrdinal = AttributeSeq(right.output)
-        .indexOf(countRight.get.references.head.exprId)
+      val leftCountOrdinal = if (countLeft.get.references.nonEmpty) {
+        AttributeSeq(left.output)
+          .indexOf(countLeft.get.references.head.exprId)
+      }
+      else {
+        -1
+      }
+      val rightCountOrdinal = if (countRight.get.references.nonEmpty) {
+        AttributeSeq(right.output)
+          .indexOf(countRight.get.references.head.exprId)
+      }
+      else {
+        -1
+      }
 
       val doAggregation = aggregatesRight.nonEmpty
       val doGrouping = groupRight.nonEmpty
@@ -219,7 +229,13 @@ class SortMergeCountJoinEvaluatorFactory(
                       val rightRow = rightMatchesIterator.next()
                       joinRow(currentLeftRow, rightRow)
                       if (boundCondition(joinRow)) {
-                        val rightCount = rightRow.getLong(rightCountOrdinal)
+//                        val rightCount = rightRow.getLong(rightCountOrdinal)
+                        val rightCount = if (rightCountOrdinal != -1) {
+                          rightRow.getLong(rightCountOrdinal)
+                        }
+                        else {
+                          1
+                        }
                         rightCountSum += rightCount
                         if (doAggregation) {
                           if (doGrouping) {
@@ -290,19 +306,19 @@ class SortMergeCountJoinEvaluatorFactory(
 
             protected val countAggGroupProjection = UnsafeProjection.create(
               Seq(countRight.get) ++ aggResultAttributes ++ groupRight,
-              Seq(countRight.get.asInstanceOf[Attribute])
+              Seq(countRight.get.toAttribute)
                 ++ aggResultAttributes ++ groupRight.map(_.toAttribute))
 
             protected val resultProjection = UnsafeProjection.create(
               left.output ++ Seq(countRight.get) ++ aggResultAttributes ++ groupRight,
-              left.output ++ Seq(countRight.get.asInstanceOf[Attribute])
+              left.output ++ Seq(countRight.get.toAttribute)
                 ++ aggResultAttributes ++ groupRight.map(_.toAttribute))
 
             logWarning("agg buffer atts: " + bufferSchema.mkString("Array(", ", ", ")"))
             logWarning("agg results: " + aggResultAttributes)
             logWarning("evaluate expressions: " + evalExpressions.mkString("Array(", ", ", ")"))
             logWarning("output types: " + (left.output ++
-              Seq(countRight.get.asInstanceOf[Attribute])
+              Seq(countRight.get.toAttribute)
               ++ aggResultAttributes ++ groupRight.map(_.toAttribute)).map(_.dataType))
 
             override def getRow: InternalRow = {
@@ -311,6 +327,13 @@ class SortMergeCountJoinEvaluatorFactory(
 //              logWarning("partition: " + partitionIndex)
 //              logWarning("currentLeftRow: " + currentLeftRow)
 //              logWarning("rightCountSum: " + rightCountSum)
+              val leftCount = if (leftCountOrdinal != -1) {
+                currentLeftRow.getLong(leftCountOrdinal)
+              }
+              else {
+                1
+              }
+
               if (doGrouping) {
                 val (groupingKey, buf) = bufferIterator.next()
 //                logWarning("grouping key: " + groupingKey + ", buffer: " + buf)
@@ -321,7 +344,6 @@ class SortMergeCountJoinEvaluatorFactory(
 //                logWarning("aggregateResult: " + aggregateResult)
 
                 val sumRow = new SpecificInternalRow(sumRowSchema)
-                val leftCount = currentLeftRow.getLong(leftCountOrdinal)
                 sumRow.setLong(0, sum * leftCount)
 
                 val aggResult = aggProjection(joinedRow3(aggregateResult, groupingKey))
@@ -330,7 +352,7 @@ class SortMergeCountJoinEvaluatorFactory(
 
 //                logWarning("resultProjection: " + resultProjection(joinRow))
 
-                val outputAtts = left.output ++ Seq(countRight.get.asInstanceOf[Attribute]) ++
+                val outputAtts = left.output ++ Seq(countRight.get.toAttribute) ++
                   aggResultAttributes ++ groupRight.map(_.toAttribute)
 
                 def printRow(ur: UnsafeRow): Unit = {
@@ -347,7 +369,6 @@ class SortMergeCountJoinEvaluatorFactory(
 //                logWarning("no grouping buffer: " + buffer)
                 expressionAggEvalProjection(buffer)
                 val sumRow = new SpecificInternalRow(sumRowSchema)
-                val leftCount = currentLeftRow.getLong(leftCountOrdinal)
                 sumRow.setLong(0, rightCountSum * leftCount)
                 if (doAggregation) {
                   joinRow.withRight(countAggGroupProjection(joinedRow2(sumRow, aggregateResult)))

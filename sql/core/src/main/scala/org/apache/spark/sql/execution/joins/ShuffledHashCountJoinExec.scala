@@ -44,7 +44,7 @@ case class ShuffledHashCountJoinExec(
     left: SparkPlan,
     right: SparkPlan,
     countLeft: Option[Expression],
-    countRight: Option[Expression],
+    countRight: Option[NamedExpression],
     aggregatesRight: Seq[AggregateExpression],
     groupRight: Seq[NamedExpression],
     isSkewJoin: Boolean = false)
@@ -56,7 +56,7 @@ case class ShuffledHashCountJoinExec(
     "buildTime" -> SQLMetrics.createTimingMetric(sparkContext, "time to build hash map"))
 
   // override def output: Seq[Attribute] = super[ShuffledJoin].output
-  override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.references.head) ++
+  override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.toAttribute) ++
     aggregatesRight.map(_.resultAttribute) ++ groupRight.map(_.toAttribute)
 
   override def outputPartitioning: Partitioning = super[ShuffledJoin].outputPartitioning

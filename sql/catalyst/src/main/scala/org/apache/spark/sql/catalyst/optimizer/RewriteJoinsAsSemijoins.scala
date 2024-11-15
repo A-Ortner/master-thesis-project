@@ -40,7 +40,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                   join: Join, keyRefs: Seq[Seq[Expression]],
                   uniqueConstraints: Seq[Seq[Expression]]) : LogicalPlan = {
     val startTime = System.nanoTime()
-    logTrace("applying rewriting to join: " + agg)
+    logWarning("applying rewriting to join: " + agg)
     // Extract the join items (including any filters, etc.)
     val (items, conditions) = extractInnerJoins(join)
 
@@ -60,6 +60,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
     val lastAggMap = new mutable.HashMap[Attribute, AggregateExpression]()
     // We store the last sum, when a sum aggregate is propagated upwards
     val lastSumMap = new mutable.HashMap[Attribute, Attribute]()
+    // Pull the multiplication of the sum by the count into the next sum aggregate
+    val nextMultiplicationMap = new mutable.HashMap[Attribute, Expression]()
 
     val namedGroupingExpressions = unnamedGroupingExpressions.map {
       case ne: NamedExpression => ne -> ne
@@ -111,7 +113,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
       && countingAggregates.isEmpty
       && sumAggregates.isEmpty
       && averageAggregates.isEmpty) {
-      logTrace("query is not applicable (0MA, counting, percentile, sum)")
+      logWarning("query is not applicable (0MA, counting, percentile, sum)")
       agg
     }
     else {
@@ -123,7 +125,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
       val jointree = hg.flatGYO
 
       if (jointree == null) {
-        logTrace("join is cyclic")
+        logWarning("join is cyclic")
         logWarning("time difference: " + (System.nanoTime() - startTime))
         agg
       }
@@ -134,7 +136,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
         val nodeContainingAllAttributes = jointree
           .findNodeContainingAttributes(aggregateAttributes ++ groupAttributes)
         if (nodeContainingAllAttributes == null) {
-          logTrace("there is no node containing all agg and group attributes")
+          logWarning("there is no node containing all agg and group attributes")
           logWarning("time difference: " + (System.nanoTime() - startTime))
 
           var root = jointree
@@ -151,7 +153,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
           //              logWarning("star counting aggregates: " + starCountingAggregates)
           val (yannakakisJoins, countingAttribute, _, _) =
             root.buildBottomUpJoinsCounting(aggregateAttributes, groupingExpressions,
-              aggregateExpressions, lastAggMap, lastSumMap, keyRefs, uniqueConstraints,
+              aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
+              keyRefs, uniqueConstraints,
               conf.yannakakisCountGroupInLeavesEnabled,
               usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
 
@@ -177,8 +180,10 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                       case Sum(_, _) =>
                         if (lastSumMap.contains(resultAtt)) {
                           val lastSumAtt = lastSumMap(resultAtt)
+//                          val lastMultiplyExpr = nextMultiplicationMap(resultAtt)
                           projectList += lastSumAtt
                           a.withNewChildren(Seq(lastSumAtt))
+//                          a.withNewChildren(Seq(Multiply(lastSumAtt, lastMultiplyExpr)))
                         }
                         else {
                           projectList ++= a.references
@@ -235,6 +240,9 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
             newCountingAggregates ++ rewrittenResultExpressions ++ projectExpressions,
             Project(projectList
               ++ Seq(countingAttribute), yannakakisJoins))
+//          val newAgg = Aggregate(groupingExpressions,
+//            newCountingAggregates ++ rewrittenResultExpressions ++ projectExpressions,
+//            yannakakisJoins)
           logWarning("new aggregate: " + newAgg)
           logWarning("time difference: " + (System.nanoTime() - startTime))
           newAgg
@@ -264,7 +272,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
               val (yannakakisJoins, countingAttribute, _, _) =
                 root.buildBottomUpJoinsCounting(aggregateAttributes,
                   groupingExpressions,
-                  aggregateExpressions, lastAggMap, lastSumMap, keyRefs, uniqueConstraints,
+                  aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
+                  keyRefs, uniqueConstraints,
                   conf.yannakakisCountGroupInLeavesEnabled,
                   usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
 
@@ -288,7 +297,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
               val (yannakakisJoins, countingAttribute, _, lastJoinWasSemijoin) =
                 root.buildBottomUpJoinsCounting(aggregateAttributes,
                   groupingExpressions,
-                  aggregateExpressions, lastAggMap, lastSumMap, keyRefs, uniqueConstraints,
+                  aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
+                  keyRefs, uniqueConstraints,
                   conf.yannakakisCountGroupInLeavesEnabled,
                   usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
 
@@ -316,7 +326,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
 //              logWarning("project exprs: " + projectExpressions)
               val (yannakakisJoins, countingAttribute, _, _) =
                 root.buildBottomUpJoinsCounting(aggregateAttributes, groupingExpressions,
-                  aggregateExpressions, lastAggMap, lastSumMap, keyRefs, uniqueConstraints,
+                  aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
+                  keyRefs, uniqueConstraints,
                   conf.yannakakisCountGroupInLeavesEnabled,
                   usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
 
@@ -359,7 +370,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
 //              logWarning("project exprs: " + projectExpressions)
               val (yannakakisJoins, countingAttribute, _, _) =
                 root.buildBottomUpJoinsCounting(aggregateAttributes, groupingExpressions,
-                  aggregateExpressions, lastAggMap, lastSumMap, keyRefs, uniqueConstraints,
+                  aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
+                  keyRefs, uniqueConstraints,
                   conf.yannakakisCountGroupInLeavesEnabled,
                   usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
 
@@ -576,6 +588,7 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
                                  aggExpressions: Seq[AggregateExpression],
                                  lastAggMap: mutable.HashMap[Attribute, AggregateExpression],
                                  lastSumMap: mutable.HashMap[Attribute, Attribute],
+                                 nextMultiplicationMap: mutable.HashMap[Attribute, Expression],
                                  keyRefs: Seq[Seq[Expression]],
                                  uniqueConstraints: Seq[Seq[Expression]], groupInLeaves: Boolean,
                                  usePhysicalCountJoin: Boolean = false):
@@ -617,8 +630,11 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
       // Make sure to project the output only to the attributes as part of the join tree
       // This can occur when we have a FKHint before the join nodes which leads to
       // Spark SQL not projecting away the attributes mentioned in the hints
-      Project(
-        outputAttributes ++ Seq(prevCountExpr), scanPlan)
+
+//      Project(
+//        outputAttributes ++ Seq(prevCountExpr), scanPlan)
+
+      scanPlan
     }
     var isLeafNode = true
     var prevSemijoined = false
@@ -631,7 +647,7 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
       val (bottomUpJoins, childCountExpr, rightPlanIsLeaf, childWasSemijoined) =
         c.buildBottomUpJoinsCounting(aggregateAttributes,
           groupingExpressions, aggExpressions, lastAggMap, lastSumMap,
-          keyRefs, uniqueConstraints, groupInLeaves,
+          nextMultiplicationMap, keyRefs, uniqueConstraints, groupInLeaves,
           usePhysicalCountJoin = usePhysicalCountJoin)
 
       val countExpressionLeft = Alias(Sum(prevCountExpr.toAttribute).toAggregateExpression(), "c")()
@@ -648,6 +664,8 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
         (prevPlan, prevCountExpr.toAttribute)
       }
       else {
+        logWarning("prevPlan: " + prevPlan)
+        logWarning("output: " + prevPlan.output)
         val outputAggregateAttributes = prevPlan.outputSet intersect aggregateAttributes
         val groupAttributes = countGroupLeft ++ outputAggregateAttributes
         val prevChildAttributes = AttributeSet(
@@ -701,28 +719,20 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
           // and if the pk is contained in the child node attributes
         && ref.last.references.head.exprId == atts._2.exprId))
 
-      val join = if (usePhysicalCountJoin && !canSemiJoin) {
-        // Only apply the CountJoin operator when the option is explicitly
-        // enabled and no semi-join is performed.
-//        val applicableAggExpressions = aggExpressions.filter(
-//          agg => {agg.references.subsetOf(rightPlan.outputSet)})
-//        val applicableLaterAggExpressions = lastAggExpressions.filter(
-//          agg => agg.references.subsetOf(rightPlan.outputSet)
-//        )
+      val newRightCount = Alias(Literal(1L, LongType), "c")()
 
+      val join = if (usePhysicalCountJoin && !canSemiJoin) {
         var applicableAggExpressions = {
           new mutable.MutableList[AggregateExpression]()
         }
         var multiplySumExpressions = new mutable.MutableList[NamedExpression]()
-        var rightMultiplySumExpressions = new mutable.MutableList[NamedExpression]()
-
-//        logWarning("lastSumMap: " + lastSumMap)
 
         aggExpressions.foreach(agg => {
           agg.aggregateFunction match {
             case Sum(sumExpression, evalMode) =>
               if (lastSumMap.contains(agg.resultAttribute)) {
                 val lastSumAtt = lastSumMap(agg.resultAttribute)
+//                val lastMultiplicationExpr = nextMultiplicationMap(agg.resultAttribute)
 
                 if (rightPlan.outputSet.contains(lastSumAtt)) {
                   //         |
@@ -737,36 +747,57 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
                   }.asInstanceOf[AggregateExpression]
                   applicableAggExpressions = applicableAggExpressions :+ newAgg
 
-                  val newAgg2 = Alias(Multiply(newAgg.resultAttribute,
-                    Cast(leftCountAttribute, newAgg.resultAttribute.dataType)), "sum")()
+                  if (leftPlan.outputSet.contains(leftCountAttribute)) {
+                    val newSum = Alias(Multiply(newAgg.resultAttribute,
+                      Cast(leftCountAttribute, newAgg.resultAttribute.dataType)), "sum")()
 
-                  multiplySumExpressions = multiplySumExpressions :+ newAgg2
+                    multiplySumExpressions = multiplySumExpressions :+ newSum
+                    lastSumMap.put(agg.resultAttribute, newSum.toAttribute)
+                  }
+                  else {
+                    lastSumMap.put(agg.resultAttribute, newAgg.resultAttribute)
+                  }
 
-                  lastSumMap.put(agg.resultAttribute, newAgg2.toAttribute)
+
+                  // Pulling all multiplications together seems no to be as effective -
+                  // code commented out. But maybe performing them inside the
+                  // CountJoin after the agg would be effective?
+//                  lastSumMap.put(agg.resultAttribute, newAgg.resultAttribute)
+//
+//                  val newMultiplicationExpr = Cast(leftCountAttribute,
+//                    newAgg.resultAttribute.dataType)
+//                  nextMultiplicationMap.put(agg.resultAttribute, newMultiplicationExpr)
                 }
 
                 if (leftPlan.outputSet.contains(lastSumAtt)) {
                   //         |
-                  //       Project(ac<-a*c)
+                  //       Project(ac<-a*(sc/Y.c))
                   //         |
-                  //       Y, c<-SUM(c)
+                  //       Y, sc<-SUM(Z.c)*Y.c
                   //      /     \
-                  //    Y(a)     Z(c)
-                  //
+                  //    Y(a,c)     Z(c)
 
-                  val newCount = Alias(Multiply(lastSumAtt,
-                    Divide(Cast(rightCountAttribute, lastSumAtt.dataType),
-                      Cast(leftCountAttribute, lastSumAtt.dataType))), "sum")()
+                  val countRightAgg = Count(Literal(1L)).toAggregateExpression()
+                  applicableAggExpressions = applicableAggExpressions :+ countRightAgg
 
-                  multiplySumExpressions = multiplySumExpressions :+ newCount
-                  lastSumMap.put(agg.resultAttribute, newCount.toAttribute)
+//                  val newSum = Alias(Multiply(lastSumAtt,
+//                    Divide(Cast(rightCountAttribute, lastSumAtt.dataType),
+//                      Cast(leftCountAttribute, lastSumAtt.dataType))), "sum")()
+
+                  val newSum = Alias(Multiply(lastSumAtt,
+                    Cast(countRightAgg.resultAttribute, lastSumAtt.dataType)), "sum")()
+
+                  multiplySumExpressions = multiplySumExpressions :+ newSum
+                  lastSumMap.put(agg.resultAttribute, newSum.toAttribute)
+
+//                  val newMultiplicationExpr = Multiply(lastMultiplicationExpr,
+//                    Divide(Cast(rightCountAttribute, lastSumAtt.dataType),
+//                      Cast(leftCountAttribute, lastSumAtt.dataType)))
+//
+//                  nextMultiplicationMap.put(agg.resultAttribute, newMultiplicationExpr)
                 }
               }
               else {
-                // logWarning("agg: " + agg)
-                // logWarning("right plan output: " + rightPlan.output)
-                // logWarning("agg references: " + agg.references)
-                // logWarning("rightplan.outputSet: " + rightPlan.outputSet)
                 // SUM aggregate has not yet occurred somewhere in the tree -
                 // check if it starts here
                 if (agg.references.subsetOf(rightPlan.outputSet)) {
@@ -775,37 +806,42 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
                   //         |
                   //       Project(ac<-ac*Y.c)
                   //         |
-                  //       Y, ac <- SUM(ac)
-                  //      /   \
-                  //     /    Project(ac<-a*c)
-                  //    /        \
-                  //  Y(c)        Z(a,c)
+                  //       Y, ac <- SUM(a*Z.c)
+                  //        /   \
+                  //       /     \
+                  //    Y(c)     Z(a,c)
+                  //              /  \
+                  //             /    \
+                  //           R(a)   S(c)
 
-//                  val intermediateSum = Alias(Multiply(sumExpression,
-//                    Cast(rightCountAttribute, sumExpression.dataType)), "rsum")()
-//
-//                  rightMultiplySumExpressions = rightMultiplySumExpressions :+ intermediateSum
-//
-//                  val newAgg = agg.transformDown {
-//                    case a: AggregateFunction =>
-//                                      a.withNewChildren(Seq(intermediateSum.toAttribute))
-//                  }.asInstanceOf[AggregateExpression]
-
-                  val newAgg = agg.transformUp {
-                    case a: AggregateFunction =>
-                      a.withNewChildren(Seq(Multiply(a.children.head,
-                        Cast(rightCountAttribute, a.children.head.dataType))))
-                  }.asInstanceOf[AggregateExpression]
+                  val newAgg = if (rightPlanIsLeaf) {
+                    agg
+                  } else {
+                    agg.transformUp {
+                      case a: AggregateFunction =>
+                        a.withNewChildren(Seq(Multiply(a.children.head,
+                          Cast(rightCountAttribute, a.children.head.dataType))))
+                    }.asInstanceOf[AggregateExpression]
+                  }
 
                   applicableAggExpressions = applicableAggExpressions :+ newAgg
 
-//                  val newAgg2 = Alias(Multiply(leftCountAttribute,
-//                    Cast(newAgg.resultAttribute, leftCountAttribute.dataType)), "sum")()
-                  val newAgg2 = Alias(Multiply(newAgg.resultAttribute,
-                    Cast(leftCountAttribute, newAgg.resultAttribute.dataType)), "sum")()
-                  multiplySumExpressions = multiplySumExpressions :+ newAgg2
+                  // Left plan is not a leaf
+                  if (leftPlan.outputSet.contains(leftCountAttribute)) {
+                    val newSum = Alias(Multiply(newAgg.resultAttribute,
+                      Cast(leftCountAttribute, newAgg.resultAttribute.dataType)), "sum")()
+                    multiplySumExpressions = multiplySumExpressions :+ newSum
 
-                  lastSumMap.put(agg.resultAttribute, newAgg2.toAttribute)
+//                    val newMultiplicationExpr = Cast(leftCountAttribute,
+//                      newAgg.resultAttribute.dataType)
+//                    nextMultiplicationMap.put(agg.resultAttribute, newMultiplicationExpr)
+
+                    lastSumMap.put(agg.resultAttribute, newSum.toAttribute)
+                  }
+                  else {
+                    lastSumMap.put(agg.resultAttribute, newAgg.resultAttribute)
+                  }
+//                  lastSumMap.put(agg.resultAttribute, newAgg.resultAttribute)
                 }
               }
               // Non-SUM aggregates (MIN/MAX)
@@ -842,16 +878,12 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
         )
 //        logWarning("applicable group atts: " + applicableGroupAttributes)
 
-        val right = if (rightMultiplySumExpressions.isEmpty) {
-          rightPlan
-        }
-        else {
-          Project(rightPlan.output ++ rightMultiplySumExpressions, rightPlan)
-        }
+        val right = rightPlan
 
         val countJoin = CountJoin(leftPlan, right,
           if (canSemiJoin) LeftSemi else Inner, Option(joinConditions),
-          Option(leftCountAttribute), Option(rightCountAttribute),
+          Option(if (isLeafNode) prevCountExpr else leftCountAttribute),
+          Option(if (rightPlanIsLeaf) newRightCount else rightCountAttribute),
           applicableAggExpressions, applicableGroupAttributes, joinHint)
 
         if (multiplySumExpressions.isEmpty) {
@@ -871,7 +903,12 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
       } else {
         if (usePhysicalCountJoin) {
           // The summed-up and multiplied result is already in the right count attribute
-          rightCountAttribute
+          if (rightPlanIsLeaf) {
+            newRightCount
+          }
+          else {
+            rightCountAttribute
+          }
         }
         else {
           // Multiply the left count with the right count

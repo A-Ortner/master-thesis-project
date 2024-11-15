@@ -330,7 +330,7 @@ trait HashCountJoin extends JoinCodegenSupport {
                         streamIter: Iterator[InternalRow],
                         hashedRelation: HashedRelation,
                         countLeft: Option[Expression],
-                        countRight: Option[Expression],
+                        countRight: Option[NamedExpression],
                         aggregatesRight: Seq[AggregateExpression],
                         groupRight: Seq[NamedExpression]): Iterator[InternalRow] = {
     val joinKeys = streamSideKeyGenerator()
@@ -338,10 +338,20 @@ trait HashCountJoin extends JoinCodegenSupport {
 
 //    logWarning("join output: " + output)
 
-    val leftCountOrdinal = AttributeSeq(streamedOutput)
-      .indexOf(countLeft.get.references.head.exprId)
-    val rightCountOrdinal = AttributeSeq(buildOutput)
-      .indexOf(countRight.get.references.head.exprId)
+    val leftCountOrdinal = if (countLeft.get.references.nonEmpty) {
+      AttributeSeq(streamedOutput)
+        .indexOf(countLeft.get.references.head.exprId)
+    }
+    else {
+      -1
+    }
+    val rightCountOrdinal = if (countRight.get.references.nonEmpty) {
+      AttributeSeq(buildOutput)
+        .indexOf(countRight.get.references.head.exprId)
+    }
+    else {
+      -1
+    }
 
     val doAggregation = aggregatesRight.nonEmpty
     val doGrouping = groupRight.nonEmpty
@@ -420,19 +430,19 @@ trait HashCountJoin extends JoinCodegenSupport {
 
     val countAggGroupProjection = UnsafeProjection.create(
       Seq(countRight.get) ++ aggResultAttributes ++ groupRight,
-      Seq(countRight.get.asInstanceOf[Attribute])
+      Seq(countRight.get.toAttribute)
         ++ aggResultAttributes ++ groupRight.map(_.toAttribute))
 
     val resultProjection = UnsafeProjection.create(
       left.output ++ Seq(countRight.get) ++ aggResultAttributes ++ groupRight,
-      left.output ++ Seq(countRight.get.asInstanceOf[Attribute])
+      left.output ++ Seq(countRight.get.toAttribute)
         ++ aggResultAttributes ++ groupRight.map(_.toAttribute))
 
     logWarning("agg buffer atts: " + bufferSchema.mkString("Array(", ", ", ")"))
     logWarning("agg results: " + aggResultAttributes)
     logWarning("evaluate expressions: " + evalExpressions.mkString("Array(", ", ", ")"))
     logWarning("output types: " + (left.output ++
-      Seq(countRight.get.asInstanceOf[Attribute])
+      Seq(countRight.get.toAttribute)
       ++ aggResultAttributes ++ groupRight.map(_.toAttribute)).map(_.dataType))
 
     if (hashedRelation == EmptyHashedRelation) {
@@ -448,7 +458,12 @@ trait HashCountJoin extends JoinCodegenSupport {
         var buffer: InternalRow = null
 
         if (matches != null) {
-          val leftCount = srow.getLong(leftCountOrdinal)
+          val leftCount = if (leftCountOrdinal != -1) {
+            srow.getLong(leftCountOrdinal)
+          }
+          else {
+            1
+          }
           if (!doGrouping) {
             // In case we do not group, create one buffer and use it for all right matches
             buffer = newBuffer()
@@ -458,7 +473,15 @@ trait HashCountJoin extends JoinCodegenSupport {
           val rightCountSum = matches.map(joinedRow.withRight)
             .filter(boundCondition)
             .map(row => {
-              val rightCount = row.getRight.getLong(rightCountOrdinal)
+              // If the count attribute is not found in the child
+              // plan (as is the case in the leaves),
+              // assume count 1
+              val rightCount = if (rightCountOrdinal != -1) {
+                row.getRight.getLong(rightCountOrdinal)
+              }
+              else {
+                1
+              }
               if (doAggregation) {
                 if (doGrouping) {
                   val groupingKey = groupingProjection(row.getRight).copy()
@@ -578,14 +601,14 @@ trait HashCountJoin extends JoinCodegenSupport {
       hashed: HashedRelation,
       numOutputRows: SQLMetric,
       countLeft: Option[Expression],
-      countRight: Option[Expression],
+      countRight: Option[NamedExpression],
       aggregatesRight: Seq[AggregateExpression],
       groupRight: Seq[NamedExpression]): Iterator[InternalRow] = {
 
     val joinedIter = countJoin(streamedIter, hashed, countLeft, countRight,
       aggregatesRight, groupRight)
 
-    val output = left.output ++ Seq(countRight.get.references.head) ++
+    val output = left.output ++ Seq(countRight.get.toAttribute) ++
       aggregatesRight.map(_.resultAttribute)
     logWarning("output: " + output)
 

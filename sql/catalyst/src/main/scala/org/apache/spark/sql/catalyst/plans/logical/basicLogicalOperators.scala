@@ -665,7 +665,7 @@ case class CountJoin(
                  joinType: JoinType,
                  condition: Option[Expression],
                  countLeft: Option[Expression],
-                 countRight: Option[Expression],
+                 countRight: Option[NamedExpression],
                  aggregatesRight: Seq[AggregateExpression],
                  groupRight: Seq[NamedExpression],
                  hint: JoinHint)
@@ -712,7 +712,7 @@ case class CountJoin(
         left.output.map(_.withNullability(true)) ++ right.output.map(_.withNullability(true))
       case _ =>
         // Standard CountJoin case
-         left.output ++ Seq(countRight.get.references.head) ++
+         left.output ++ Seq(countRight.get.toAttribute) ++
            aggregatesRight.map(_.resultAttribute) ++ groupRight.map(_.toAttribute)
     }
   }

@@ -47,7 +47,7 @@ case class BroadcastHashCountJoinExec(
     left: SparkPlan,
     right: SparkPlan,
     countLeft: Option[Expression],
-    countRight: Option[Expression],
+    countRight: Option[NamedExpression],
     aggregatesRight: Seq[AggregateExpression],
     groupRight: Seq[NamedExpression],
     isNullAwareAntiJoin: Boolean = false)
@@ -74,7 +74,7 @@ case class BroadcastHashCountJoinExec(
     }
   }
 
-  override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.references.head) ++
+  override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.toAttribute) ++
     aggregatesRight.map(_.resultAttribute) ++ groupRight.map(_.toAttribute)
 
   override lazy val outputPartitioning: Partitioning = {

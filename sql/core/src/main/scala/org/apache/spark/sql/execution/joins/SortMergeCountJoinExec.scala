@@ -43,7 +43,7 @@ case class SortMergeCountJoinExec(
     left: SparkPlan,
     right: SparkPlan,
     countLeft: Option[Expression],
-    countRight: Option[Expression],
+    countRight: Option[NamedExpression],
     aggregatesRight: Seq[AggregateExpression],
     groupRight: Seq[NamedExpression],
     isSkewJoin: Boolean = false) extends ShuffledJoin {
@@ -52,7 +52,7 @@ case class SortMergeCountJoinExec(
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
     "spillSize" -> SQLMetrics.createSizeMetric(sparkContext, "spill size"))
 
-  override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.references.head) ++
+  override def output: Seq[Attribute] = left.output ++ Seq(countRight.get.toAttribute) ++
     aggregatesRight.map(_.resultAttribute) ++ groupRight.map(_.toAttribute)
 
   override def outputPartitioning: Partitioning = left.outputPartitioning
@@ -137,7 +137,7 @@ case class SortMergeCountJoinExec(
       left,
       right,
       countLeft: Option[Expression],
-      countRight: Option[Expression],
+      countRight: Option[NamedExpression],
       aggregatesRight: Seq[AggregateExpression],
       groupRight: Seq[NamedExpression],
       output,
