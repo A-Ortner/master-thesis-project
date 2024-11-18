@@ -164,26 +164,39 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
 //          logWarning("lastAggMap: " + lastAggMap)
 //          logWarning("lastSumMap: " + lastSumMap)
 
-          val rewrittenResultExpressions = resultExpressions.map { expr =>
+          val rewrittenResultExpressions = resultExpressions.map {
+            expr =>
             expr.transformDown {
               case ae: AggregateExpression =>
+                val resultAtt = equivalentAggregateExpressions.getExprState(ae).map(_.expr)
+                  .getOrElse(ae).asInstanceOf[AggregateExpression].resultAttribute
+                ae.aggregateFunction match {
+                  case a: Count =>
+                    if (lastSumMap.contains(resultAtt)) {
+                      val lastSumAtt = lastSumMap(resultAtt)
+                      projectList += lastSumAtt
+                      Sum(lastSumAtt).toAggregateExpression()
+                    }
+                    else {
+                      projectList ++= a.references
+                      Sum(Multiply(
+                        a.children.head, Cast(countingAttribute, a.children.head.dataType)))
+                        .toAggregateExpression()
+                    }
+                  case _ =>
                 // The final aggregation buffer's attributes will be `finalAggregationAttributes`,
                 // so replace each aggregate expression by its corresponding attribute in the set:
                 ae.transformDown {
                   case a: AggregateFunction =>
-                    val resultAtt = equivalentAggregateExpressions.getExprState(ae).map(_.expr)
-                      .getOrElse(ae).asInstanceOf[AggregateExpression].resultAttribute
-
-//                    logWarning("resultAtt: " + resultAtt)
-
                     a match {
+                      // TODO this could be simplified by merging Sum and Count cases
                       case Sum(_, _) =>
                         if (lastSumMap.contains(resultAtt)) {
                           val lastSumAtt = lastSumMap(resultAtt)
-//                          val lastMultiplyExpr = nextMultiplicationMap(resultAtt)
+                          //       val lastMultiplyExpr = nextMultiplicationMap(resultAtt)
                           projectList += lastSumAtt
                           a.withNewChildren(Seq(lastSumAtt))
-//                          a.withNewChildren(Seq(Multiply(lastSumAtt, lastMultiplyExpr)))
+                          //       a.withNewChildren(Seq(Multiply(lastSumAtt, lastMultiplyExpr)))
                         }
                         else {
                           projectList ++= a.references
@@ -191,14 +204,13 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                             Seq(Multiply(
                               a.children.head, Cast(countingAttribute, a.children.head.dataType))))
                         }
-
                       case _ =>
                         if (lastAggMap.contains(resultAtt)) {
                           val lastResultAtt = lastAggMap(resultAtt).resultAttribute
                           projectList += lastResultAtt
 
                           a.withNewChildren(
-                              Seq(lastResultAtt))
+                            Seq(lastResultAtt))
 
                         }
                         else {
@@ -212,6 +224,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                           a
                         }
                     }
+                }
                 }
 
               case expression if !expression.foldable =>
@@ -727,123 +740,134 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
         }
         var multiplySumExpressions = new mutable.MutableList[NamedExpression]()
 
-        aggExpressions.foreach(agg => {
-          agg.aggregateFunction match {
-            case Sum(sumExpression, evalMode) =>
-              if (lastSumMap.contains(agg.resultAttribute)) {
-                val lastSumAtt = lastSumMap(agg.resultAttribute)
-//                val lastMultiplicationExpr = nextMultiplicationMap(agg.resultAttribute)
+        def sumOrCountCase(agg: AggregateExpression) = {
+          if (lastSumMap.contains(agg.resultAttribute)) {
+            val lastSumAtt = lastSumMap(agg.resultAttribute)
+            //                val lastMultiplicationExpr =
+            //                nextMultiplicationMap(agg.resultAttribute)
 
-                if (rightPlan.outputSet.contains(lastSumAtt)) {
-                  //         |
-                  //       Project(ac<-a*c)
-                  //         |
-                  //       Y, a<-SUM(a)
-                  //      /   \
-                  //    Y(c)      Z(a)
-                  //
-                  val newAgg = agg.transformDown {
-                    case a: AggregateFunction => a.withNewChildren(Seq(lastSumAtt))
-                  }.asInstanceOf[AggregateExpression]
-                  applicableAggExpressions = applicableAggExpressions :+ newAgg
+            if (rightPlan.outputSet.contains(lastSumAtt)) {
+              //         |
+              //       Project(ac<-a*c)
+              //         |
+              //       Y, a<-SUM(a)
+              //      /   \
+              //    Y(c)      Z(a)
+              //
+              //              val newAgg = agg.transformDown {
+              //                case a: AggregateFunction => a.withNewChildren(Seq(lastSumAtt))
+              //              }.asInstanceOf[AggregateExpression]
+              val newAgg = Sum(lastSumAtt).toAggregateExpression()
+              applicableAggExpressions = applicableAggExpressions :+ newAgg
 
-                  if (leftPlan.outputSet.contains(leftCountAttribute)) {
-                    val newSum = Alias(Multiply(newAgg.resultAttribute,
-                      Cast(leftCountAttribute, newAgg.resultAttribute.dataType)), "sum")()
+              if (leftPlan.outputSet.contains(leftCountAttribute)) {
+                val newSum = Alias(Multiply(newAgg.resultAttribute,
+                  Cast(leftCountAttribute, newAgg.resultAttribute.dataType)), "sum")()
 
-                    multiplySumExpressions = multiplySumExpressions :+ newSum
-                    lastSumMap.put(agg.resultAttribute, newSum.toAttribute)
-                  }
-                  else {
-                    lastSumMap.put(agg.resultAttribute, newAgg.resultAttribute)
-                  }
-
-
-                  // Pulling all multiplications together seems no to be as effective -
-                  // code commented out. But maybe performing them inside the
-                  // CountJoin after the agg would be effective?
-//                  lastSumMap.put(agg.resultAttribute, newAgg.resultAttribute)
-//
-//                  val newMultiplicationExpr = Cast(leftCountAttribute,
-//                    newAgg.resultAttribute.dataType)
-//                  nextMultiplicationMap.put(agg.resultAttribute, newMultiplicationExpr)
-                }
-
-                if (leftPlan.outputSet.contains(lastSumAtt)) {
-                  //         |
-                  //       Project(ac<-a*(sc/Y.c))
-                  //         |
-                  //       Y, sc<-SUM(Z.c)*Y.c
-                  //      /     \
-                  //    Y(a,c)     Z(c)
-
-                  val countRightAgg = Count(Literal(1L)).toAggregateExpression()
-                  applicableAggExpressions = applicableAggExpressions :+ countRightAgg
-
-//                  val newSum = Alias(Multiply(lastSumAtt,
-//                    Divide(Cast(rightCountAttribute, lastSumAtt.dataType),
-//                      Cast(leftCountAttribute, lastSumAtt.dataType))), "sum")()
-
-                  val newSum = Alias(Multiply(lastSumAtt,
-                    Cast(countRightAgg.resultAttribute, lastSumAtt.dataType)), "sum")()
-
-                  multiplySumExpressions = multiplySumExpressions :+ newSum
-                  lastSumMap.put(agg.resultAttribute, newSum.toAttribute)
-
-//                  val newMultiplicationExpr = Multiply(lastMultiplicationExpr,
-//                    Divide(Cast(rightCountAttribute, lastSumAtt.dataType),
-//                      Cast(leftCountAttribute, lastSumAtt.dataType)))
-//
-//                  nextMultiplicationMap.put(agg.resultAttribute, newMultiplicationExpr)
-                }
+                multiplySumExpressions = multiplySumExpressions :+ newSum
+                lastSumMap.put(agg.resultAttribute, newSum.toAttribute)
               }
               else {
-                // SUM aggregate has not yet occurred somewhere in the tree -
-                // check if it starts here
-                if (agg.references.subsetOf(rightPlan.outputSet)) {
-
-                  // logWarning("is subset")
-                  //         |
-                  //       Project(ac<-ac*Y.c)
-                  //         |
-                  //       Y, ac <- SUM(a*Z.c)
-                  //        /   \
-                  //       /     \
-                  //    Y(c)     Z(a,c)
-                  //              /  \
-                  //             /    \
-                  //           R(a)   S(c)
-
-                  val newAgg = if (rightPlanIsLeaf) {
-                    agg
-                  } else {
-                    agg.transformUp {
-                      case a: AggregateFunction =>
-                        a.withNewChildren(Seq(Multiply(a.children.head,
-                          Cast(rightCountAttribute, a.children.head.dataType))))
-                    }.asInstanceOf[AggregateExpression]
-                  }
-
-                  applicableAggExpressions = applicableAggExpressions :+ newAgg
-
-                  // Left plan is not a leaf
-                  if (leftPlan.outputSet.contains(leftCountAttribute)) {
-                    val newSum = Alias(Multiply(newAgg.resultAttribute,
-                      Cast(leftCountAttribute, newAgg.resultAttribute.dataType)), "sum")()
-                    multiplySumExpressions = multiplySumExpressions :+ newSum
-
-//                    val newMultiplicationExpr = Cast(leftCountAttribute,
-//                      newAgg.resultAttribute.dataType)
-//                    nextMultiplicationMap.put(agg.resultAttribute, newMultiplicationExpr)
-
-                    lastSumMap.put(agg.resultAttribute, newSum.toAttribute)
-                  }
-                  else {
-                    lastSumMap.put(agg.resultAttribute, newAgg.resultAttribute)
-                  }
-//                  lastSumMap.put(agg.resultAttribute, newAgg.resultAttribute)
-                }
+                lastSumMap.put(agg.resultAttribute, newAgg.resultAttribute)
               }
+
+
+              // Pulling all multiplications together seems no to be as effective -
+              // code commented out. But maybe performing them inside the
+              // CountJoin after the agg would be effective?
+              //                  lastSumMap.put(agg.resultAttribute, newAgg.resultAttribute)
+              //
+              //                  val newMultiplicationExpr = Cast(leftCountAttribute,
+              //                    newAgg.resultAttribute.dataType)
+              //                  nextMultiplicationMap.
+              //                  put(agg.resultAttribute, newMultiplicationExpr)
+            }
+
+            if (leftPlan.outputSet.contains(lastSumAtt)) {
+              //         |
+              //       Project(ac<-a*(sc/Y.c))
+              //         |
+              //       Y, sc<-SUM(Z.c)*Y.c
+              //      /     \
+              //    Y(a,c)     Z(c)
+
+              val countRightAgg = Count(Literal(1L)).toAggregateExpression()
+              applicableAggExpressions = applicableAggExpressions :+ countRightAgg
+
+              //                  val newSum = Alias(Multiply(lastSumAtt,
+              //                    Divide(Cast(rightCountAttribute, lastSumAtt.dataType),
+              //                      Cast(leftCountAttribute, lastSumAtt.dataType))), "sum")()
+
+              val newSum = Alias(Multiply(lastSumAtt,
+                Cast(countRightAgg.resultAttribute, lastSumAtt.dataType)), "sum")()
+
+              multiplySumExpressions = multiplySumExpressions :+ newSum
+              lastSumMap.put(agg.resultAttribute, newSum.toAttribute)
+
+              //                  val newMultiplicationExpr = Multiply(lastMultiplicationExpr,
+              //                    Divide(Cast(rightCountAttribute, lastSumAtt.dataType),
+              //                      Cast(leftCountAttribute, lastSumAtt.dataType)))
+              //
+              //                  nextMultiplicationMap
+              //                  .put(agg.resultAttribute, newMultiplicationExpr)
+            }
+          }
+          else {
+            // SUM/COUNT aggregate has not yet occurred somewhere in the tree -
+            // check if it starts here
+            if (agg.references.subsetOf(rightPlan.outputSet)) {
+
+              // logWarning("is subset")
+              //         |
+              //       Project(ac<-ac*Y.c)
+              //         |
+              //       Y, ac <- SUM(a*Z.c)
+              //        /   \
+              //       /     \
+              //    Y(c)     Z(a,c)
+              //              /  \
+              //             /    \
+              //           R(a)   S(c)
+
+              val newAgg = if (rightPlanIsLeaf) {
+                agg
+              } else {
+                agg.transformUp {
+                  case a: AggregateFunction =>
+                    a.withNewChildren(Seq(Multiply(a.children.head,
+                      Cast(rightCountAttribute, a.children.head.dataType))))
+                }.asInstanceOf[AggregateExpression]
+              }
+
+              applicableAggExpressions = applicableAggExpressions :+ newAgg
+
+              // Left plan is not a leaf
+              if (leftPlan.outputSet.contains(leftCountAttribute)) {
+                val newSum = Alias(Multiply(newAgg.resultAttribute,
+                  Cast(leftCountAttribute, newAgg.resultAttribute.dataType)), "sum")()
+                multiplySumExpressions = multiplySumExpressions :+ newSum
+
+                //                    val newMultiplicationExpr = Cast(leftCountAttribute,
+                //                      newAgg.resultAttribute.dataType)
+                //                    nextMultiplicationMap
+                //                    .put(agg.resultAttribute, newMultiplicationExpr)
+
+                lastSumMap.put(agg.resultAttribute, newSum.toAttribute)
+              }
+              else {
+                lastSumMap.put(agg.resultAttribute, newAgg.resultAttribute)
+              }
+              //                  lastSumMap.put(agg.resultAttribute, newAgg.resultAttribute)
+            }
+          }
+        }
+
+        aggExpressions.foreach(agg => {
+          agg.aggregateFunction match {
+            case Sum(_, _) =>
+              sumOrCountCase(agg)
+            case Count(_) =>
+              sumOrCountCase(agg)
               // Non-SUM aggregates (MIN/MAX)
             case _ =>
               if (lastAggMap.contains(agg.resultAttribute)) {
