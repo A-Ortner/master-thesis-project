@@ -323,7 +323,6 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
       case j @ ExtractEquiJoinKeys(joinType, leftKeys, rightKeys, nonEquiCond,
           _, left, right, hint) =>
         def createBroadcastHashJoin(onlyLookingAtHint: Boolean) = {
-          logWarning("createBroadcastHashJoin")
           val buildSide = getBroadcastBuildSide(
             left, right, joinType, hint, onlyLookingAtHint, conf)
           checkHintBuildSide(onlyLookingAtHint, buildSide, joinType, hint, true)
@@ -341,7 +340,6 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
         }
 
         def createShuffleHashJoin(onlyLookingAtHint: Boolean) = {
-          logWarning("createShuffleHashJoin")
           val buildSide = getShuffleHashJoinBuildSide(
             left, right, joinType, hint, onlyLookingAtHint, conf)
           checkHintBuildSide(onlyLookingAtHint, buildSide, joinType, hint, false)
@@ -359,7 +357,6 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
         }
 
         def createSortMergeJoin() = {
-          logWarning("createSortMergeJoin")
           if (RowOrdering.isOrderable(leftKeys)) {
             Some(Seq(joins.SortMergeJoinExec(
               leftKeys, rightKeys, joinType, nonEquiCond, planLater(left), planLater(right))))
@@ -395,10 +392,8 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
         }
 
         if (hint.isEmpty) {
-          logWarning("hint empty")
           createJoinWithoutHint()
         } else {
-          logWarning("hint not empty")
           createBroadcastHashJoin(true)
             .orElse { if (hintToSortMergeJoin(hint)) createSortMergeJoin() else None }
             .orElse(createShuffleHashJoin(true))
@@ -508,13 +503,9 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
           case ExtractCountJoinEquiJoinKeys(joinType, leftKeys, rightKeys, nonEquiCond,
           _, left, right, countLeft, countRight, aggregatesRight, groupRight, hint) =>
             def createBroadcastHashCountJoin(onlyLookingAtHint: Boolean) = {
-              logWarning("createBroadcastHashCountJoin")
               val buildSide = getBroadcastCountJoinBuildSide(
                 left, right, joinType, hint, onlyLookingAtHint, conf)
-              // val buildSide = Option(BuildRight)
-              logWarning("build side: " + buildSide)
               checkHintBuildSide(onlyLookingAtHint, buildSide, joinType, hint, true)
-              logWarning("mapping build side: " + buildSide)
               buildSide.map {
                 buildSide =>
                   Seq(joins.BroadcastHashCountJoinExec(
@@ -532,13 +523,9 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
               }
             }
             def createShuffleHashCountJoin(onlyLookingAtHint: Boolean) = {
-              logWarning("createShuffleHashCountJoin")
               val buildSide = getShuffleHashCountJoinBuildSide(
                 left, right, joinType, hint, onlyLookingAtHint, conf)
-              // val buildSide = Option(BuildRight)
-              logWarning("build side: " + buildSide)
               checkHintBuildSide(onlyLookingAtHint, buildSide, joinType, hint, false)
-              logWarning("mapping build side: " + buildSide)
               buildSide.map {
                 buildSide =>
                   Seq(joins.ShuffledHashCountJoinExec(
@@ -556,7 +543,6 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
               }
             }
             def createSortMergeCountJoin() = {
-              logWarning("createSortMergeCountJoin")
               if (RowOrdering.isOrderable(leftKeys)) {
                 Some(Seq(joins.SortMergeCountJoinExec(
                   leftKeys,
@@ -575,7 +561,6 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
             }
 
             def createCountJoinWithoutHint() = {
-              logWarning("createCountJoinWithoutHint called")
               if (aggsRight.nonEmpty) {
                 createSortMergeCountJoin().get
                 // temp fix because there is a bug in the count hash join with grouping
@@ -589,10 +574,8 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
             }
 
             if (hint.isEmpty) {
-              logWarning("hint empty")
               createCountJoinWithoutHint()
             } else {
-              logWarning("hint not empty")
               createBroadcastHashCountJoin(true)
                 .orElse { if (hintToSortMergeJoin(hint)) createSortMergeCountJoin() else None }
                 .orElse(createShuffleHashCountJoin(true))

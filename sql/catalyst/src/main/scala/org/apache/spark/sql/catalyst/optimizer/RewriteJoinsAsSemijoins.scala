@@ -136,13 +136,16 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
         val nodeContainingAllAttributes = jointree
           .findNodeContainingAttributes(aggregateAttributes ++ groupAttributes)
         if (nodeContainingAllAttributes == null) {
-          logWarning("there is no node containing all agg and group attributes")
+          logWarning("not guarded! there is no node containing all agg and group attributes")
           logWarning("time difference: " + (System.nanoTime() - startTime))
 
           var root = jointree
           val nodeContainingGroupAttributes = jointree.findNodeContainingAttributes(groupAttributes)
 
+          var piecewiseGuarded = false
           if (nodeContainingGroupAttributes != null) {
+            piecewiseGuarded = true
+            logWarning("piecewise-guarded!")
             root = nodeContainingGroupAttributes.reroot
             // Choose the root containing the group attributes, if one exists
             // If none contains all of them, choose any join tree
@@ -250,13 +253,14 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
               }
             }).asInstanceOf[Seq[NamedExpression]]
           val newAgg = Aggregate(groupingExpressions,
-            newCountingAggregates ++ rewrittenResultExpressions ++ projectExpressions,
+            newCountingAggregates ++ rewrittenResultExpressions,
             Project(projectList
               ++ Seq(countingAttribute), yannakakisJoins))
 //          val newAgg = Aggregate(groupingExpressions,
 //            newCountingAggregates ++ rewrittenResultExpressions ++ projectExpressions,
 //            yannakakisJoins)
-          logWarning("new aggregate: " + newAgg)
+          val queryClass = if (piecewiseGuarded) "piecewise-guarded" else "unguarded"
+          logWarning(f"new aggregate ($queryClass): " + newAgg)
           logWarning("time difference: " + (System.nanoTime() - startTime))
           newAgg
         }
@@ -272,7 +276,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
 
             val newAgg = Aggregate(groupingExpressions, resultExpressions,
               yannakakisJoins)
-            logWarning("new aggregate: " + newAgg)
+            logWarning("new aggregate (0MA): " + newAgg)
             logWarning("time difference: " + (System.nanoTime() - startTime))
             newAgg
           }
@@ -301,7 +305,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
               val newAgg = Aggregate(groupingExpressions,
                 newCountingAggregates ++ projectExpressions,
                 Project(projectList ++ Seq(countingAttribute), yannakakisJoins))
-              logWarning("new aggregate: " + newAgg)
+              logWarning("new aggregate (guarded): " + newAgg)
               logWarning("time difference: " + (System.nanoTime() - startTime))
               newAgg
             }
@@ -330,7 +334,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
               val newAgg = Aggregate(groupingExpressions,
                 newPercentileAggregates ++ projectExpressions,
                 Project(projectList ++ Seq(countingAttribute), yannakakisJoins))
-              logWarning("new aggregate: " + newAgg)
+              logWarning("new aggregate (guarded): " + newAgg)
               logWarning("time difference: " + (System.nanoTime() - startTime))
               newAgg
             }
@@ -374,7 +378,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
               val newAgg = Aggregate(groupingExpressions, newAverageAggregates ++
                 projectExpressions,
                 Project(projectList ++ Seq(countingAttribute), yannakakisJoins))
-              logWarning("new aggregate: " + newAgg)
+              logWarning("new aggregate (guarded): " + newAgg)
               logWarning("time difference: " + (System.nanoTime() - startTime))
               newAgg
             }
