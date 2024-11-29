@@ -69,7 +69,7 @@ class SortMergeCountJoinEvaluatorFactory(
       val leftIter = inputs(0)
       val rightIter = inputs(1)
 
-     logWarning("join output: " + output)
+//     logWarning("join output: " + output)
 
       val boundCondition: InternalRow => Boolean = {
         condition.map { cond =>
@@ -314,12 +314,12 @@ class SortMergeCountJoinEvaluatorFactory(
               left.output ++ Seq(countRight.get.toAttribute)
                 ++ aggResultAttributes ++ groupRight.map(_.toAttribute))
 
-            logWarning("agg buffer atts: " + bufferSchema.mkString("Array(", ", ", ")"))
-            logWarning("agg results: " + aggResultAttributes)
-            logWarning("evaluate expressions: " + evalExpressions.mkString("Array(", ", ", ")"))
-            logWarning("output types: " + (left.output ++
-              Seq(countRight.get.toAttribute)
-              ++ aggResultAttributes ++ groupRight.map(_.toAttribute)).map(_.dataType))
+//            logWarning("agg buffer atts: " + bufferSchema.mkString("Array(", ", ", ")"))
+//            logWarning("agg results: " + aggResultAttributes)
+//            logWarning("evaluate expressions: " + evalExpressions.mkString("Array(", ", ", ")"))
+//            logWarning("output types: " + (left.output ++
+//              Seq(countRight.get.toAttribute)
+//              ++ aggResultAttributes ++ groupRight.map(_.toAttribute)).map(_.dataType))
 
             override def getRow: InternalRow = {
 //              logWarning("getRow (doaggregation = " + doAggregation +

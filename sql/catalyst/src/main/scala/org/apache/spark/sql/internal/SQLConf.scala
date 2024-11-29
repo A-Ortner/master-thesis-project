@@ -2613,6 +2613,13 @@ object SQLConf {
       .booleanConf
       .createWithDefault(false)
 
+  val YANNAKAKIS_UNGUARDED_ENABLED =
+    buildConf("spark.sql.yannakakis.unguardedEnabled")
+      .doc("Optimize unguarded queries")
+      .version("2.3.0")
+      .booleanConf
+      .createWithDefault(false)
+
   val CBO_ENABLED =
     buildConf("spark.sql.cbo.enabled")
       .doc("Enables CBO for estimation of plan statistics when set true.")
@@ -4908,6 +4915,9 @@ class SQLConf extends Serializable with Logging with SqlApiConf {
 
   def yannakakisPhysicalCountEnabled: Boolean =
     getConf(SQLConf.YANNAKAKIS_PHYSICAL_COUNTJOIN_ENABLED)
+
+  def yannakakisUnguardedEnabled: Boolean =
+    getConf(SQLConf.YANNAKAKIS_UNGUARDED_ENABLED)
 
   def cboEnabled: Boolean = getConf(SQLConf.CBO_ENABLED)
 

@@ -120,7 +120,6 @@ object DynamicJoinSelection extends Rule[LogicalPlan] with JoinSelectionHelper {
             && stage.mapStats.isDefined => hasManyEmptyPartitions(stage.mapStats.get)
           case _ => false
         }
-        logWarning("canBroadcastPlan: " + canBroadcastPlan)
 
         val demoteBroadcastHash = if (manyEmptyInPlan && canBroadcastPlan) {
           join.joinType match {
@@ -172,8 +171,6 @@ object DynamicJoinSelection extends Rule[LogicalPlan] with JoinSelectionHelper {
             Some(hint.rightHint.getOrElse(HintInfo()).copy(strategy = Some(strategy))))
         }
       }
-      logWarning("hint: " + hint)
-      logWarning("newHint: " + newHint)
       if (newHint.ne(hint)) {
         j.copy(hint = newHint)
       } else {
@@ -183,22 +180,16 @@ object DynamicJoinSelection extends Rule[LogicalPlan] with JoinSelectionHelper {
       var newHint = hint
       if (!hint.leftHint.exists(_.strategy.isDefined)) {
         selectCountJoinStrategy(j, true).foreach { strategy =>
-          logWarning("strategy: " + strategy)
           newHint = newHint.copy(leftHint =
             Some(hint.leftHint.getOrElse(HintInfo()).copy(strategy = Some(strategy))))
-          logWarning("new hint: " + newHint)
         }
       }
       if (!hint.rightHint.exists(_.strategy.isDefined)) {
         selectCountJoinStrategy(j, false).foreach { strategy =>
-          logWarning("strategy: " + strategy)
           newHint = newHint.copy(rightHint =
             Some(hint.rightHint.getOrElse(HintInfo()).copy(strategy = Some(strategy))))
-          logWarning("new hint: " + newHint)
         }
       }
-      logWarning("hint: " + hint)
-      logWarning("newHint: " + newHint)
       if (newHint.ne(hint)) {
         j.copy(hint = newHint)
       } else {

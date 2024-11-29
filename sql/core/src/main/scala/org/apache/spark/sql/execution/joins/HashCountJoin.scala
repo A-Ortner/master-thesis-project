@@ -438,12 +438,12 @@ trait HashCountJoin extends JoinCodegenSupport {
       left.output ++ Seq(countRight.get.toAttribute)
         ++ aggResultAttributes ++ groupRight.map(_.toAttribute))
 
-    logWarning("agg buffer atts: " + bufferSchema.mkString("Array(", ", ", ")"))
-    logWarning("agg results: " + aggResultAttributes)
-    logWarning("evaluate expressions: " + evalExpressions.mkString("Array(", ", ", ")"))
-    logWarning("output types: " + (left.output ++
-      Seq(countRight.get.toAttribute)
-      ++ aggResultAttributes ++ groupRight.map(_.toAttribute)).map(_.dataType))
+//    logWarning("agg buffer atts: " + bufferSchema.mkString("Array(", ", ", ")"))
+//    logWarning("agg results: " + aggResultAttributes)
+//    logWarning("evaluate expressions: " + evalExpressions.mkString("Array(", ", ", ")"))
+//    logWarning("output types: " + (left.output ++
+//      Seq(countRight.get.toAttribute)
+//      ++ aggResultAttributes ++ groupRight.map(_.toAttribute)).map(_.dataType))
 
     if (hashedRelation == EmptyHashedRelation) {
       Iterator.empty

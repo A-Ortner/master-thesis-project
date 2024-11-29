@@ -150,10 +150,14 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
             // Choose the root containing the group attributes, if one exists
             // If none contains all of them, choose any join tree
           }
+          else {
+            if (!conf.yannakakisUnguardedEnabled) {
+              logWarning("unguarded. plan is not changed")
+              return agg
+            }
+          }
+          logWarning("applicable query (joins=" + (items.size - 1) + ")")
 
-          val starCountingAggregates = countingAggregates
-            .filter(agg => agg.references.isEmpty)
-          //              logWarning("star counting aggregates: " + starCountingAggregates)
           val (yannakakisJoins, countingAttribute, _, _) =
             root.buildBottomUpJoinsCounting(aggregateAttributes, groupingExpressions,
               aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
@@ -169,66 +173,68 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
 
           val rewrittenResultExpressions = resultExpressions.map {
             expr =>
-            expr.transformDown {
-              case ae: AggregateExpression =>
-                val resultAtt = equivalentAggregateExpressions.getExprState(ae).map(_.expr)
-                  .getOrElse(ae).asInstanceOf[AggregateExpression].resultAttribute
-                ae.aggregateFunction match {
-                  case a: Count =>
-                    if (lastSumMap.contains(resultAtt)) {
-                      val lastSumAtt = lastSumMap(resultAtt)
-                      projectList += lastSumAtt
-                      Sum(lastSumAtt).toAggregateExpression()
-                    }
-                    else {
-                      projectList ++= a.references
-                      Sum(Multiply(
-                        a.children.head, Cast(countingAttribute, a.children.head.dataType)))
-                        .toAggregateExpression()
-                    }
-                  case _ =>
-                // The final aggregation buffer's attributes will be `finalAggregationAttributes`,
-                // so replace each aggregate expression by its corresponding attribute in the set:
-                ae.transformDown {
-                  case a: AggregateFunction =>
-                    a match {
-                      // TODO this could be simplified by merging Sum and Count cases
-                      case Sum(_, _) =>
-                        if (lastSumMap.contains(resultAtt)) {
-                          val lastSumAtt = lastSumMap(resultAtt)
-                          //       val lastMultiplyExpr = nextMultiplicationMap(resultAtt)
-                          projectList += lastSumAtt
-                          a.withNewChildren(Seq(lastSumAtt))
-                          //       a.withNewChildren(Seq(Multiply(lastSumAtt, lastMultiplyExpr)))
-                        }
-                        else {
-                          projectList ++= a.references
-                          a.withNewChildren(
-                            Seq(Multiply(
-                              a.children.head, Cast(countingAttribute, a.children.head.dataType))))
-                        }
-                      case _ =>
-                        if (lastAggMap.contains(resultAtt)) {
-                          val lastResultAtt = lastAggMap(resultAtt).resultAttribute
-                          projectList += lastResultAtt
+              expr.transformDown {
+                case ae: AggregateExpression =>
+                  val resultAtt = equivalentAggregateExpressions.getExprState(ae).map(_.expr)
+                    .getOrElse(ae).asInstanceOf[AggregateExpression].resultAttribute
+                  ae.aggregateFunction match {
+                    case a: Count =>
+                      if (lastSumMap.contains(resultAtt)) {
+                        val lastSumAtt = lastSumMap(resultAtt)
+                        projectList += lastSumAtt
+                        Sum(lastSumAtt).toAggregateExpression()
+                      }
+                      else {
+                        projectList ++= a.references
+                        Sum(Multiply(
+                          a.children.head, Cast(countingAttribute, a.children.head.dataType)))
+                          .toAggregateExpression()
+                      }
+                    case _ =>
+                      // The final aggregation buffer's attributes will be
+                      // `finalAggregationAttributes`,
+                      // so replace each aggregate expression by its corresponding
+                      // attribute in the set:
+                      ae.transformDown {
+                        case a: AggregateFunction =>
+                          a match {
+                            // TODO this could be simplified by merging Sum and Count cases
+                            case Sum(_, _) =>
+                              if (lastSumMap.contains(resultAtt)) {
+                                val lastSumAtt = lastSumMap(resultAtt)
+                                //       val lastMultiplyExpr = nextMultiplicationMap(resultAtt)
+                                projectList += lastSumAtt
+                                a.withNewChildren(Seq(lastSumAtt))
+                              }
+                              else {
+                                projectList ++= a.references
+                                a.withNewChildren(
+                                  Seq(Multiply(a.children.head,
+                                    Cast(countingAttribute, a.children.head.dataType))))
+                              }
+                            case _ =>
+                              // MIN, MAX
+                              if (lastAggMap.contains(resultAtt)) {
+                                val lastResultAtt = lastAggMap(resultAtt).resultAttribute
+                                projectList += lastResultAtt
 
-                          a.withNewChildren(
-                            Seq(lastResultAtt))
+                                a.withNewChildren(
+                                  Seq(lastResultAtt))
 
-                        }
-                        else {
-                          // If the att is not in the lastAggMap, it means that the attribute
-                          // occurred in the root of the tree - and only gets propagated up on the
-                          // left.
-                          //  Therefore, there is no intermediate aggregation function in-between
-                          // and we can directly access the attribute.
-                          projectList ++= a.references
+                              }
+                              else {
+                                // If the att is not in the lastAggMap, it means that the attribute
+                                // occurred in the root of the tree - and only gets propagated
+                                // up on the left.
+                                //  Therefore, there is no intermediate aggregation function
+                                //  in-between and we can directly access the attribute.
+                                projectList ++= a.references
 
-                          a
-                        }
-                    }
-                }
-                }
+                                a
+                              }
+                          }
+                      }
+                  }
 
               case expression if !expression.foldable =>
                 // Since we're using `namedGroupingAttributes` to extract the grouping key
@@ -244,16 +250,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
 
           projectList ++= groupingExpressions
 
-          val newCountingAggregates = starCountingAggregates
-            .map(agg => agg.transformDown {
-              case AggregateExpression(aggFn, mode, isDistinct, filter, resultId)
-              => aggFn match {
-                case Count(s) => AggregateExpression(
-                  Sum(countingAttribute), mode, isDistinct, filter, resultId)
-              }
-            }).asInstanceOf[Seq[NamedExpression]]
           val newAgg = Aggregate(groupingExpressions,
-            newCountingAggregates ++ rewrittenResultExpressions,
+            rewrittenResultExpressions,
             Project(projectList
               ++ Seq(countingAttribute), yannakakisJoins))
 //          val newAgg = Aggregate(groupingExpressions,
@@ -266,6 +264,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
         }
         else {
           val root = nodeContainingAllAttributes.reroot
+          logWarning("applicable query (joins=" + (items.size - 1) + ")")
 
           if (countingAggregates.isEmpty
             && percentileAggregates.isEmpty
@@ -281,135 +280,203 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
             newAgg
           }
           else {
-            // Otherwise, use the counting plan as a basis
-            if (countingAggregates.nonEmpty) {
-              val starCountingAggregates = countingAggregates
-                .filter(agg => agg.references.isEmpty)
+            val (yannakakisJoins, countingAttribute, _, _) =
+              root.buildBottomUpJoinsCounting(aggregateAttributes,
+                groupingExpressions,
+                aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
+                keyRefs, uniqueConstraints,
+                conf.yannakakisCountGroupInLeavesEnabled,
+                usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
+
+            val rewrittenResultExpressions = resultExpressions.map {
+              expr =>
+                expr.transformDown {
+                  case aggExpr @ AggregateExpression(aggFn, mode, isDistinct, filter, resultId) =>
+                    aggFn match {
+                      case a: Count =>
+                        AggregateExpression(
+                        Sum(countingAttribute), mode, isDistinct, filter, resultId)
+
+                      case Percentile(c, percExp, freqExp, mutableAggBufferOffset,
+                      inputAggBufferOffset, reverse) =>
+                        val freqExpr = countingAttribute
+                        AggregateExpression(
+                          Percentile(c, percExp, freqExpr, mutableAggBufferOffset,
+                            inputAggBufferOffset, reverse), mode, isDistinct, filter, resultId)
+
+                      case Average(_, _) =>
+                        val aggAttribute = aggFn.references.head
+                        val sumAggregateExpr = aggFn.transformUp {
+                          case a@Average(c, evalMode) =>
+                            Sum(c.transformUp {
+                              case att: Attribute => Multiply(att,
+                                Cast(countingAttribute, att.dataType), evalMode)
+                            }, evalMode)
+                        }.asInstanceOf[AggregateFunction].toAggregateExpression()
+
+                        val countAggregateExpr = Sum(
+                          If(aggAttribute.isNull,
+                            Literal(0L, LongType), countingAttribute))
+                          .toAggregateExpression()
+                        Cast(
+                          if (DoubleType.acceptsType(sumAggregateExpr.dataType) &&
+                            DoubleType.acceptsType(countAggregateExpr.dataType)) {
+                            Divide(sumAggregateExpr, countAggregateExpr)
+                          } else {
+                            // TODO check if there is a better way than casting to DoubleDecimal?
+                            Divide(Cast(sumAggregateExpr, DoubleDecimal),
+                              Cast(countAggregateExpr, DoubleDecimal))
+                          }, aggExpr.dataType)
+
+                      case Sum(_, _) =>
+                        AggregateExpression(aggFn.transformUp {
+                          case s @ Sum(c, evalMode) =>
+                            Sum(c.transformUp {
+                              case att: Attribute => Multiply(att,
+                                Cast(countingAttribute, att.dataType), evalMode)
+                            }, evalMode)
+                        }.asInstanceOf[AggregateFunction], mode, isDistinct, filter, resultId)
+                    }
+                }.asInstanceOf[NamedExpression]
+            }
+
+            val newAgg = Aggregate(groupingExpressions,
+              rewrittenResultExpressions, yannakakisJoins)
+
+            logWarning("new aggregate (guarded): " + newAgg)
+            logWarning("time difference: " + (System.nanoTime() - startTime))
+            newAgg
+//
+//            // Otherwise, use the counting plan as a basis
+//            if (countingAggregates.nonEmpty) {
+//              val starCountingAggregates = countingAggregates
+//                .filter(agg => agg.references.isEmpty)
 //              logWarning("star counting aggregates: " + starCountingAggregates)
-              val (yannakakisJoins, countingAttribute, _, _) =
-                root.buildBottomUpJoinsCounting(aggregateAttributes,
-                  groupingExpressions,
-                  aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
-                  keyRefs, uniqueConstraints,
-                  conf.yannakakisCountGroupInLeavesEnabled,
-                  usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
-
-              val newCountingAggregates = starCountingAggregates
-                .map(agg => agg.transformDown {
-                  case AggregateExpression(aggFn, mode, isDistinct, filter, resultId)
-                  => aggFn match {
-                    case Count(s) => AggregateExpression(
-                      Sum(countingAttribute), mode, isDistinct, filter, resultId)
-                  }
-                }).asInstanceOf[Seq[NamedExpression]]
-              val newAgg = Aggregate(groupingExpressions,
-                newCountingAggregates ++ projectExpressions,
-                Project(projectList ++ Seq(countingAttribute), yannakakisJoins))
-              logWarning("new aggregate (guarded): " + newAgg)
-              logWarning("time difference: " + (System.nanoTime() - startTime))
-              newAgg
-            }
-            else if (percentileAggregates.nonEmpty) {
+//              val (yannakakisJoins, countingAttribute, _, _) =
+//                root.buildBottomUpJoinsCounting(aggregateAttributes,
+//                  groupingExpressions,
+//                  aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
+//                  keyRefs, uniqueConstraints,
+//                  conf.yannakakisCountGroupInLeavesEnabled,
+//                  usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
+//
+//              val newCountingAggregates = starCountingAggregates
+//                .map(agg => agg.transformDown {
+//                  case AggregateExpression(aggFn, mode, isDistinct, filter, resultId)
+//                  => aggFn match {
+//                    case Count(s) => AggregateExpression(
+//                      Sum(countingAttribute), mode, isDistinct, filter, resultId)
+//                  }
+//                }).asInstanceOf[Seq[NamedExpression]]
+//              val newAgg = Aggregate(groupingExpressions,
+//                newCountingAggregates ++ projectExpressions,
+//                Project(projectList ++ Seq(countingAttribute), yannakakisJoins))
+//              logWarning("new aggregate (guarded): " + newAgg)
+//              logWarning("time difference: " + (System.nanoTime() - startTime))
+//              newAgg
+//            }
+//            else if (percentileAggregates.nonEmpty) {
 //              logWarning("percentile aggregates: " + percentileAggregates)
-              val (yannakakisJoins, countingAttribute, _, lastJoinWasSemijoin) =
-                root.buildBottomUpJoinsCounting(aggregateAttributes,
-                  groupingExpressions,
-                  aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
-                  keyRefs, uniqueConstraints,
-                  conf.yannakakisCountGroupInLeavesEnabled,
-                  usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
-
-              val newPercentileAggregates = percentileAggregates
-                .map(agg => agg.transformDown {
-                  case AggregateExpression(aggFn, mode, isDistinct, filter, resultId)
-                  => aggFn match {
-                    case Percentile(c, percExp, freqExp, mutableAggBufferOffset,
-                    inputAggBufferOffset, reverse) =>
-                      val freqExpr = countingAttribute
-                      AggregateExpression(
-                      Percentile(c, percExp, freqExpr, mutableAggBufferOffset,
-                        inputAggBufferOffset, reverse), mode, isDistinct, filter, resultId)
-                  }
-                }).asInstanceOf[Seq[NamedExpression]]
-              val newAgg = Aggregate(groupingExpressions,
-                newPercentileAggregates ++ projectExpressions,
-                Project(projectList ++ Seq(countingAttribute), yannakakisJoins))
-              logWarning("new aggregate (guarded): " + newAgg)
-              logWarning("time difference: " + (System.nanoTime() - startTime))
-              newAgg
-            }
-            else if (averageAggregates.nonEmpty) {
+//              val (yannakakisJoins, countingAttribute, _, lastJoinWasSemijoin) =
+//                root.buildBottomUpJoinsCounting(aggregateAttributes,
+//                  groupingExpressions,
+//                  aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
+//                  keyRefs, uniqueConstraints,
+//                  conf.yannakakisCountGroupInLeavesEnabled,
+//                  usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
+//
+//              val newPercentileAggregates = percentileAggregates
+//                .map(agg => agg.transformDown {
+//                  case AggregateExpression(aggFn, mode, isDistinct, filter, resultId)
+//                  => aggFn match {
+//                    case Percentile(c, percExp, freqExp, mutableAggBufferOffset,
+//                    inputAggBufferOffset, reverse) =>
+//                      val freqExpr = countingAttribute
+//                      AggregateExpression(
+//                      Percentile(c, percExp, freqExpr, mutableAggBufferOffset,
+//                        inputAggBufferOffset, reverse), mode, isDistinct, filter, resultId)
+//                  }
+//                }).asInstanceOf[Seq[NamedExpression]]
+//              val newAgg = Aggregate(groupingExpressions,
+//                newPercentileAggregates ++ projectExpressions,
+//                Project(projectList ++ Seq(countingAttribute), yannakakisJoins))
+//              logWarning("new aggregate (guarded): " + newAgg)
+//              logWarning("time difference: " + (System.nanoTime() - startTime))
+//              newAgg
+//            }
+//            else if (averageAggregates.nonEmpty) {
 //              logWarning("average aggregates: " + averageAggregates)
 //              logWarning("project exprs: " + projectExpressions)
-              val (yannakakisJoins, countingAttribute, _, _) =
-                root.buildBottomUpJoinsCounting(aggregateAttributes, groupingExpressions,
-                  aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
-                  keyRefs, uniqueConstraints,
-                  conf.yannakakisCountGroupInLeavesEnabled,
-                  usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
-
-              val newAverageAggregates = averageAggregates
-                .map(agg => agg.transformUp {
-                  case aggExpr @ AggregateExpression(aggFn, mode, isDistinct, filter, resultId) =>
-                    val aggAttribute = aggFn.references.head
-                    val sumAggregateExpr = AggregateExpression(aggFn.transformUp {
-                      case a@Average(c, evalMode) =>
+//              val (yannakakisJoins, countingAttribute, _, _) =
+//                root.buildBottomUpJoinsCounting(aggregateAttributes, groupingExpressions,
+//                  aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
+//                  keyRefs, uniqueConstraints,
+//                  conf.yannakakisCountGroupInLeavesEnabled,
+//                  usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
+//
+//              val newAverageAggregates = averageAggregates
+//                .map(agg => agg.transformUp {
+//                  case aggExpr @ AggregateExpression(aggFn, mode, isDistinct, filter, resultId) =>
+//                    val aggAttribute = aggFn.references.head
+//                    val sumAggregateExpr = AggregateExpression(aggFn.transformUp {
+//                      case a@Average(c, evalMode) =>
 //                        logWarning("avg: " + a)
-                        Sum(c.transformUp {
-                          case att: Attribute => Multiply(att,
-                            Cast(countingAttribute, att.dataType), evalMode)
-                        }, evalMode)
-                    }.asInstanceOf[AggregateFunction], mode, isDistinct, filter, resultId)
-                    val countAggregateExpr = Sum(
-                      If(aggAttribute.isNull,
-                        Literal(0L, LongType), countingAttribute))
-                      .toAggregateExpression()
-                  Cast(
-                    // Check if both aggregate results are of type Double - can do integer division
-                    if (DoubleType.acceptsType(sumAggregateExpr.dataType) &&
-                      DoubleType.acceptsType(countAggregateExpr.dataType)) {
-                      Divide(sumAggregateExpr, countAggregateExpr)
-                    } else {
-                      // TODO check if there is a better way than casting to DoubleDecimal?
-                      Divide(Cast(sumAggregateExpr, DoubleDecimal),
-                        Cast(countAggregateExpr, DoubleDecimal))
-                    }, aggExpr.dataType)
-                }).asInstanceOf[Seq[NamedExpression]]
-              val newAgg = Aggregate(groupingExpressions, newAverageAggregates ++
-                projectExpressions,
-                Project(projectList ++ Seq(countingAttribute), yannakakisJoins))
-              logWarning("new aggregate (guarded): " + newAgg)
-              logWarning("time difference: " + (System.nanoTime() - startTime))
-              newAgg
-            }
-            else {
+//                        Sum(c.transformUp {
+//                          case att: Attribute => Multiply(att,
+//                            Cast(countingAttribute, att.dataType), evalMode)
+//                        }, evalMode)
+//                    }.asInstanceOf[AggregateFunction], mode, isDistinct, filter, resultId)
+//                    val countAggregateExpr = Sum(
+//                      If(aggAttribute.isNull,
+//                        Literal(0L, LongType), countingAttribute))
+//                      .toAggregateExpression()
+//                  Cast(
+//                    // Check if both aggregate results are of type Double - can
+            //                    do integer division
+//                    if (DoubleType.acceptsType(sumAggregateExpr.dataType) &&
+//                      DoubleType.acceptsType(countAggregateExpr.dataType)) {
+//                      Divide(sumAggregateExpr, countAggregateExpr)
+//                    } else {
+//                      // TODO check if there is a better way than casting to DoubleDecimal?
+//                      Divide(Cast(sumAggregateExpr, DoubleDecimal),
+//                        Cast(countAggregateExpr, DoubleDecimal))
+//                    }, aggExpr.dataType)
+//                }).asInstanceOf[Seq[NamedExpression]]
+//              val newAgg = Aggregate(groupingExpressions, newAverageAggregates ++
+//                projectExpressions,
+//                Project(projectList ++ Seq(countingAttribute), yannakakisJoins))
+//              logWarning("new aggregate (guarded): " + newAgg)
+//              logWarning("time difference: " + (System.nanoTime() - startTime))
+//              newAgg
+//            }
+//            else {
 //              logWarning("sum aggregates: " + sumAggregates)
 //              logWarning("project exprs: " + projectExpressions)
-              val (yannakakisJoins, countingAttribute, _, _) =
-                root.buildBottomUpJoinsCounting(aggregateAttributes, groupingExpressions,
-                  aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
-                  keyRefs, uniqueConstraints,
-                  conf.yannakakisCountGroupInLeavesEnabled,
-                  usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
-
-              val newSumAggregates = sumAggregates
-                .map(agg => agg.transformDown {
-                  case AggregateExpression(aggFn, mode, isDistinct, filter, resultId) =>
-                    AggregateExpression(aggFn.transformUp {
-                    case s @ Sum(c, evalMode) =>
-                      Sum(c.transformUp {
-                      case att: Attribute => Multiply(att,
-                        Cast(countingAttribute, att.dataType), evalMode)
-                    }, evalMode)
-                  }.asInstanceOf[AggregateFunction], mode, isDistinct, filter, resultId)
-                }).asInstanceOf[Seq[NamedExpression]]
-              val newAgg = Aggregate(groupingExpressions, newSumAggregates ++ projectExpressions,
-              //  yannakakisJoins)
-              Project(projectList ++ Seq(countingAttribute), yannakakisJoins))
-              logWarning("new aggregate: " + newAgg)
-              logWarning("time difference: " + (System.nanoTime() - startTime))
-              newAgg
-            }
+//              val (yannakakisJoins, countingAttribute, _, _) =
+//                root.buildBottomUpJoinsCounting(aggregateAttributes, groupingExpressions,
+//                  aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
+//                  keyRefs, uniqueConstraints,
+//                  conf.yannakakisCountGroupInLeavesEnabled,
+//                  usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
+//
+//              val newSumAggregates = sumAggregates
+//                .map(agg => agg.transformDown {
+//                  case AggregateExpression(aggFn, mode, isDistinct, filter, resultId) =>
+//                    AggregateExpression(aggFn.transformUp {
+//                    case s @ Sum(c, evalMode) =>
+//                      Sum(c.transformUp {
+//                      case att: Attribute => Multiply(att,
+//                        Cast(countingAttribute, att.dataType), evalMode)
+//                    }, evalMode)
+//                  }.asInstanceOf[AggregateFunction], mode, isDistinct, filter, resultId)
+//                }).asInstanceOf[Seq[NamedExpression]]
+//              val newAgg = Aggregate(groupingExpressions, newSumAggregates ++ projectExpressions,
+//              //  yannakakisJoins)
+//              Project(projectList ++ Seq(countingAttribute), yannakakisJoins))
+//              logWarning("new aggregate (guarded): " + newAgg)
+//              logWarning("time difference: " + (System.nanoTime() - startTime))
+//              newAgg
+//            }
           }
         }
       }
