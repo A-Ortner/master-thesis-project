@@ -120,6 +120,7 @@ class SortMergeCountJoinEvaluatorFactory(
 
       val useUnsafeBuffer = bufferSchema
         .map(_.dataType).forall(UnsafeRow.isMutable)
+
       val unsafeProjection =
         UnsafeProjection.create(bufferSchema.map(_.dataType))
 
@@ -173,10 +174,10 @@ class SortMergeCountJoinEvaluatorFactory(
       val aggRowProjection: UnsafeProjection =
         UnsafeProjection.create(groupRight, right.output)
 
-      logWarning("agregate functions: " + aggregateFunctions.mkString("Array(", ", ", ")"))
-      logWarning("groupRight: " + groupRight)
-      logWarning("right output: " + right.output)
-      logWarning("left output: " + left.output)
+//      logWarning("agregate functions: " + aggregateFunctions.mkString("Array(", ", ", ")"))
+//      logWarning("groupRight: " + groupRight)
+//      logWarning("right output: " + right.output)
+//      logWarning("left output: " + left.output)
 
       joinType match {
         // TODO remove other join types as they get ignored in the countjoin

@@ -680,6 +680,25 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
         }
         var multiplySumExpressions = new mutable.MutableList[NamedExpression]()
 
+        def createMultiplication(a: Expression, b: Expression): Expression = {
+          val multiplication = if (a.dataType.acceptsType(b.dataType)) {
+            Multiply(a, b)
+          }
+          else {
+            a.dataType match {
+              case _: DecimalType => Multiply(a, Cast(b, DecimalType(20, 0)))
+              case _ => Multiply(a, Cast(b, a.dataType))
+            }
+          }
+
+          if (multiplication.dataType == a.dataType) {
+            multiplication
+          }
+          else {
+            Cast(multiplication, a.dataType)
+          }
+        }
+
         def sumOrCountCase(agg: AggregateExpression) = {
           if (lastSumMap.contains(agg.resultAttribute)) {
             val lastSumAtt = lastSumMap(agg.resultAttribute)
@@ -696,8 +715,8 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
               applicableAggExpressions = applicableAggExpressions :+ newAgg
 
               if (leftPlan.outputSet.contains(leftCountAttribute)) {
-                val newSum = Alias(Multiply(newAgg.resultAttribute,
-                  Cast(leftCountAttribute, newAgg.resultAttribute.dataType)), "sum")()
+                val newSum = Alias(createMultiplication(newAgg.resultAttribute,
+                  leftCountAttribute), "sum")()
 
                 multiplySumExpressions = multiplySumExpressions :+ newSum
                 lastSumMap.put(agg.resultAttribute, newSum.toAttribute)
@@ -718,8 +737,8 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
               val countRightAgg = Count(Literal(1L)).toAggregateExpression()
               applicableAggExpressions = applicableAggExpressions :+ countRightAgg
 
-              val newSum = Alias(Multiply(lastSumAtt,
-                Cast(countRightAgg.resultAttribute, lastSumAtt.dataType)), "sum")()
+              val newSum = Alias(createMultiplication(lastSumAtt,
+                countRightAgg.resultAttribute), "sum")()
 
               multiplySumExpressions = multiplySumExpressions :+ newSum
               lastSumMap.put(agg.resultAttribute, newSum.toAttribute)
@@ -747,8 +766,8 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
               } else {
                 agg.transformUp {
                   case a: AggregateFunction =>
-                    a.withNewChildren(Seq(Multiply(a.children.head,
-                      Cast(rightCountAttribute, a.children.head.dataType))))
+                    a.withNewChildren(Seq(createMultiplication(a.children.head,
+                      rightCountAttribute)))
                 }.asInstanceOf[AggregateExpression]
               }
 
@@ -756,8 +775,8 @@ class HTNode(val edges: Set[HGEdge], var children: Set[HTNode], var parent: HTNo
 
               // Left plan is not a leaf
               if (leftPlan.outputSet.contains(leftCountAttribute)) {
-                val newSum = Alias(Multiply(newAgg.resultAttribute,
-                  Cast(leftCountAttribute, newAgg.resultAttribute.dataType)), "sum")()
+                val newSum = Alias(createMultiplication(newAgg.resultAttribute,
+                  leftCountAttribute), "sum")()
                 multiplySumExpressions = multiplySumExpressions :+ newSum
 
                 lastSumMap.put(agg.resultAttribute, newSum.toAttribute)
