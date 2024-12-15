@@ -173,10 +173,10 @@ class SortMergeCountJoinEvaluatorFactory(
       val aggRowProjection: UnsafeProjection =
         UnsafeProjection.create(groupRight, right.output)
 
-//      logWarning("agregate functions: " + aggregateFunctions.mkString("Array(", ", ", ")"))
-//      logWarning("groupRight: " + groupRight)
-//      logWarning("right output: " + right.output)
-//      logWarning("left output: " + left.output)
+      logWarning("agregate functions: " + aggregateFunctions.mkString("Array(", ", ", ")"))
+      logWarning("groupRight: " + groupRight)
+      logWarning("right output: " + right.output)
+      logWarning("left output: " + left.output)
 
       joinType match {
         // TODO remove other join types as they get ignored in the countjoin
@@ -225,9 +225,15 @@ class SortMergeCountJoinEvaluatorFactory(
                     val rightMatchesIterator = currentRightMatches.generateIterator()
 
                     rightCountSum = 0L
+//                    logWarning("rightMatches length: " + currentRightMatches.length)
+//                    logWarning("rightMatchesIterator has next: " + rightMatchesIterator.hasNext)
                     while (rightMatchesIterator.hasNext) {
                       val rightRow = rightMatchesIterator.next()
                       joinRow(currentLeftRow, rightRow)
+//                      logWarning("rightRow: " + rightRow)
+//                      logWarning("joinRow: " + joinRow)
+//                      logWarning("boundCondition: " + boundCondition)
+//                      logWarning("condition: " + condition)
                       if (boundCondition(joinRow)) {
 //                        val rightCount = rightRow.getLong(rightCountOrdinal)
                         val rightCount = if (rightCountOrdinal != -1) {
@@ -237,7 +243,7 @@ class SortMergeCountJoinEvaluatorFactory(
                           1
                         }
                         rightCountSum += rightCount
-                        if (doAggregation) {
+                        if (doAggregation || doGrouping) {
                           if (doGrouping) {
                             // We need to create a copy of the grouping key because rightRow changes
                             val groupingKey = groupingProjection(rightRow).copy()
@@ -261,7 +267,7 @@ class SortMergeCountJoinEvaluatorFactory(
 //                                bufferSchema.mkString("Array(", ", ", ")"))
 //                              logWarning("useUnsafeBuffer: " + useUnsafeBuffer)
                               // buffer = new SpecificInternalRow(aggregatesRight.map(_.dataType))
-                              val bufferRow = new SpecificInternalRow(bufferSchema.map(_.dataType))
+//                            val bufferRow = new SpecificInternalRow(bufferSchema.map(_.dataType))
                               buffer = newBuffer()
 //                              logWarning("new buffer: " + buffer)
                               expressionAggInitialProjection.target(buffer)(EmptyRow)
@@ -290,6 +296,13 @@ class SortMergeCountJoinEvaluatorFactory(
                     if (doGrouping) {
 //                      logWarning("setting buffer iterator: " + bufferMap)
                       bufferIterator = bufferMap.asScala.iterator
+
+                      if (!bufferMap.isEmpty) {
+                        return true
+                      }
+                      else {
+                        return false
+                      }
                     }
                     return true
                   }
@@ -331,6 +344,7 @@ class SortMergeCountJoinEvaluatorFactory(
                 currentLeftRow.getLong(leftCountOrdinal)
               }
               else {
+                // If there is no left count attribute (leaf node)
                 1
               }
 

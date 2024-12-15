@@ -482,7 +482,7 @@ trait HashCountJoin extends JoinCodegenSupport {
               else {
                 1
               }
-              if (doAggregation) {
+              if (doAggregation || doGrouping) {
                 if (doGrouping) {
                   val groupingKey = groupingProjection(row.getRight).copy()
                   var sum: Long = 0
@@ -608,8 +608,11 @@ trait HashCountJoin extends JoinCodegenSupport {
     val joinedIter = countJoin(streamedIter, hashed, countLeft, countRight,
       aggregatesRight, groupRight)
 
+//    val output = left.output ++ Seq(countRight.get.toAttribute) ++
+//      aggregatesRight.map(_.resultAttribute)
+
     val output = left.output ++ Seq(countRight.get.toAttribute) ++
-      aggregatesRight.map(_.resultAttribute)
+      aggregatesRight.map(_.resultAttribute) ++ groupRight.map(_.toAttribute)
     logWarning("output: " + output)
 
     val resultProj = UnsafeProjection.create(output, output)
