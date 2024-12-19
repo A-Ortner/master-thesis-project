@@ -85,6 +85,59 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
         .reduce((g1, g2) => g1 ++ g2)
     }
 
+    val aliasProjections = projectList.filter {
+      case Alias(child, name) => true
+      case _ => false
+    }
+
+    val groupAliasProjections = aliasProjections.filter {
+      expr => groupingExpressions.exists(ge => ge.references.contains(expr.toAttribute))
+    }
+
+    val groupAliasAttributes = groupAliasProjections.flatMap(expr => expr.references)
+
+    val aggAliasProjections = aliasProjections.filter {
+      expr => aggregateExpressions.exists(ae => ae.references.contains(expr.toAttribute))
+    }
+
+    val aggAliasMap
+    = aggAliasProjections.map(a => a.asInstanceOf[Alias])
+      .map(a => (a.toAttribute.exprId, a.child))
+      .toMap
+
+    val aggregateExpressionsWithAliasesReplaced = aggregateExpressions
+      .map(ae => ae.transformDown {
+        case expr: Attribute =>
+          logWarning("expr: " + expr)
+          logWarning("contains: " + aggAliasMap.contains(expr.exprId))
+          logWarning("map: " + aggAliasMap)
+          logWarning("output: " + aggAliasMap.get(expr.exprId))
+          if (aggAliasMap.get(expr.exprId).nonEmpty) {
+            aggAliasMap(expr.exprId)
+         }
+          else {
+            expr
+          }
+      }.asInstanceOf[AggregateExpression])
+
+    val resultExpressionsWithAliasesReplaced = resultExpressions
+      .map(ne => ne.transformDown {
+        case expr: Attribute =>
+          if (aggAliasMap.contains(expr.exprId)) {
+            aggAliasMap(expr.exprId)
+          }
+          else {
+            expr
+          }
+      }.asInstanceOf[NamedExpression])
+
+    logWarning("groupAliasProjections: " + groupAliasProjections)
+    logWarning("groupAliasAttributes: " + groupAliasAttributes)
+    logWarning("aggAliasProjections: " + aggAliasProjections)
+    logWarning("alias map: " + aggAliasMap)
+    logWarning("aggregate exprs with aliases replaced: " + aggregateExpressionsWithAliasesReplaced)
+    logWarning("result exprs with aliases replaced: " + resultExpressionsWithAliasesReplaced)
+
     // 0MA queries can be evaluated purely by bottom-up semi joins
     // Currently, they are limited to Min and Max queries
     // For all aggregates (0MA or counting-based), check if there are no references to attributes
@@ -105,8 +158,6 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
     val averageAggregates = resultExpressions
       .filter(agg => agg.references.isEmpty || !(agg.references subsetOf groupAttributes))
       .filter(agg => isAverage(agg))
-    val projectExpressions = resultExpressions
-      .filter(agg => isNonAgg(agg))
 
     if (zeroMAAggregates.isEmpty
       && percentileAggregates.isEmpty
@@ -117,11 +168,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
       agg
     }
     else {
-//      logWarning("group attributes: " + groupAttributes)
-//      logWarning("counting aggregates: " + countingAggregates)
-
       val hg = new Hypergraph(items, conditions)
-//      logWarning("hypergraph:\n" + hg.toString)
       val jointree = hg.flatGYO
 
       if (jointree == null) {
@@ -159,19 +206,18 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
           logWarning("applicable query (joins=" + (items.size - 1) + ")")
 
           val (yannakakisJoins, countingAttribute, _, _) =
-            root.buildBottomUpJoinsCounting(aggregateAttributes, groupingExpressions,
-              aggregateExpressions, lastAggMap, lastSumMap, nextMultiplicationMap,
+            root.buildBottomUpJoinsCounting(aggregateAttributes,
+              groupingExpressions ++ groupAliasAttributes,
+              aggregateExpressionsWithAliasesReplaced,
+              lastAggMap, lastSumMap, nextMultiplicationMap,
               keyRefs, uniqueConstraints,
               conf.yannakakisCountGroupInLeavesEnabled,
               usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
 
-          var projectList: mutable.MutableList[NamedExpression] =
-            new mutable.MutableList[NamedExpression]
-
 //          logWarning("lastAggMap: " + lastAggMap)
 //          logWarning("lastSumMap: " + lastSumMap)
 
-          val rewrittenResultExpressions = resultExpressions.map {
+          val rewrittenResultExpressions = resultExpressionsWithAliasesReplaced.map {
             expr =>
               expr.transformDown {
                 case ae: AggregateExpression =>
@@ -181,11 +227,9 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                     case a: Count =>
                       if (lastSumMap.contains(resultAtt)) {
                         val lastSumAtt = lastSumMap(resultAtt)
-                        projectList += lastSumAtt
                         Sum(lastSumAtt).toAggregateExpression()
                       }
                       else {
-                        projectList ++= a.references
                         Sum(Multiply(
                           a.children.head, Cast(countingAttribute, a.children.head.dataType)))
                           .toAggregateExpression()
@@ -203,11 +247,9 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                               if (lastSumMap.contains(resultAtt)) {
                                 val lastSumAtt = lastSumMap(resultAtt)
                                 //       val lastMultiplyExpr = nextMultiplicationMap(resultAtt)
-                                projectList += lastSumAtt
                                 a.withNewChildren(Seq(lastSumAtt))
                               }
                               else {
-                                projectList ++= a.references
                                 a.withNewChildren(
                                   Seq(Multiply(a.children.head,
                                     Cast(countingAttribute, a.children.head.dataType))))
@@ -216,7 +258,6 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                               // MIN, MAX
                               if (lastAggMap.contains(resultAtt)) {
                                 val lastResultAtt = lastAggMap(resultAtt).resultAttribute
-                                projectList += lastResultAtt
 
                                 a.withNewChildren(
                                   Seq(lastResultAtt))
@@ -228,8 +269,6 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                                 // up on the left.
                                 //  Therefore, there is no intermediate aggregation function
                                 //  in-between and we can directly access the attribute.
-                                projectList ++= a.references
-
                                 a
                               }
                           }
@@ -248,12 +287,9 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
           }
 //          logWarning("rewritten result expressions: " + rewrittenResultExpressions)
 
-          projectList ++= groupingExpressions
-
           val newAgg = Aggregate(groupingExpressions,
             rewrittenResultExpressions,
-            Project(projectList
-              ++ Seq(countingAttribute), yannakakisJoins))
+            Project(yannakakisJoins.output ++ groupAliasProjections, yannakakisJoins))
 //          val newAgg = Aggregate(groupingExpressions,
 //            newCountingAggregates ++ rewrittenResultExpressions ++ projectExpressions,
 //            yannakakisJoins)
@@ -367,6 +403,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
         join@Join(_, _, Inner, _, _))) =>
           rewritePlan(agg, groupingExpressions, aggExpressions, projectList,
             join, keyRefs = Seq(), uniqueConstraints = Seq())
+          // FK/PK optimizations (to be removed at some point)
         case agg@Aggregate(groupingExpressions, aggExpressions,
         project@Project(projectList,
         FKHint(join@Join(_, _, Inner, _, _), keyRefs, uniqueConstraints))) =>
