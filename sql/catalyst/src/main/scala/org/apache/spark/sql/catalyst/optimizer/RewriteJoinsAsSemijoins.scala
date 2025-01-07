@@ -18,11 +18,11 @@
 package org.apache.spark.sql.catalyst.optimizer
 
 import scala.collection.mutable
-
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.dsl.expressions.DslExpression
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate._
+import org.apache.spark.sql.catalyst.optimizer.RewriteJoinsAsSemijoins.{extractInnerJoins, logWarning}
 import org.apache.spark.sql.catalyst.plans.{Inner, InnerLike, LeftSemi}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
@@ -388,6 +388,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
     }
   }
   override def apply(plan: LogicalPlan): LogicalPlan = {
+    logWarning ("Hello andi." )
+
     if (!conf.yannakakisEnabled) {
       plan
     }
@@ -395,33 +397,53 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
       plan.transformDownWithPruning(_.containsPattern(TreePattern.AGGREGATE), ruleId) {
         case agg@Aggregate(groupingExpressions, aggExpressions,
         join@Join(_, _, Inner, _, _)) => agg
+
         case agg@Aggregate(groupingExpressions, aggExpressions,
         filter@Filter(filterConds,
         join@Join(_, _, Inner, _, _))) => agg
+
         case agg@Aggregate(groupingExpressions, aggExpressions,
         project@Project(projectList,
         join@Join(_, _, Inner, _, _))) =>
-          rewritePlan(agg, groupingExpressions, aggExpressions, projectList,
-            join, keyRefs = Seq(), uniqueConstraints = Seq())
+          val unguarded = isUnguarded(plan, groupingExpressions, aggExpressions)
+          if (unguarded) {
+            logWarning("query unguarded. ")
+            return plan
+          } else { rewritePlan(agg, groupingExpressions, aggExpressions, projectList,
+            join, keyRefs = Seq(), uniqueConstraints = Seq()) }
           // FK/PK optimizations (to be removed at some point)
+
         case agg@Aggregate(groupingExpressions, aggExpressions,
         project@Project(projectList,
         FKHint(join@Join(_, _, Inner, _, _), keyRefs, uniqueConstraints))) =>
+          val unguarded = isUnguarded(plan, groupingExpressions, aggExpressions)
+          if (unguarded) {
+            logWarning("query unguarded. ")
+            return plan
+          } else {
           rewritePlan(agg, groupingExpressions, aggExpressions, projectList,
-            join, keyRefs, uniqueConstraints)
+            join, keyRefs, uniqueConstraints) }
+
         case agg@Aggregate(groupingExpressions, aggExpressions,
         project@Project(projectList,
         FKHint(
         project2@Project(projectList2,
         join@Join(_, _, Inner, _, _)), keyRefs, uniqueConstraints))) =>
-          rewritePlan(agg, groupingExpressions, aggExpressions, projectList,
-            join, keyRefs, uniqueConstraints)
+          val unguarded = isUnguarded(plan, groupingExpressions, aggExpressions)
+          if (unguarded) {
+            logWarning("query unguarded. ")
+            return plan
+          } else {
+            rewritePlan(agg, groupingExpressions, aggExpressions, projectList,
+            join, keyRefs, uniqueConstraints) }
+
         case agg@Aggregate(_, _, _) =>
           logWarning("not applicable to aggregate: " + agg)
           agg
       }
     }
   }
+
   def is0MA(expr: Expression): Boolean = {
     expr match {
       case Alias(child, name) => is0MA(child)
@@ -513,7 +535,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
    * Extracts items of consecutive inner joins and join conditions.
    * This method works for bushy trees and left/right deep trees.
    */
-  private def extractInnerJoins(plan: LogicalPlan): (Seq[LogicalPlan], ExpressionSet) = {
+  def extractInnerJoins(plan: LogicalPlan): (Seq[LogicalPlan], ExpressionSet) = {
     plan match {
       // replace innerlike by more general join type?
       case Join(left, right, _: InnerLike, Some(cond), _) =>
@@ -527,6 +549,53 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
       case _ =>
         (Seq(plan), ExpressionSet())
     }
+  }
+}
+
+def isUnguarded(
+                 plan: LogicalPlan,
+                 unnamedGroupingExpressions: Seq[Expression],
+                 resultExpressions: Seq[NamedExpression]
+               ): Boolean = {
+
+  val namedGroupingExpressions = unnamedGroupingExpressions.map {
+    case ne: NamedExpression => ne -> ne
+    // If the expression is not a NamedExpression, we add an alias.
+    // This allows the Aggregate Operator to directly get the Seq of attributes
+    // representing the grouping expressions.
+    case other =>
+      val withAlias = Alias(other, other.toString)()
+      other -> withAlias
+  }
+
+  val groupingExpressions = namedGroupingExpressions.map(_._2)
+
+  val aggregateAttributes = resultExpressions
+    .map(expr => expr.references)
+    .reduce((a1, a2) => a1 ++ a2)
+
+  val groupAttributes =
+    if (groupingExpressions.isEmpty) {
+      AttributeSet.empty
+    } else {
+      groupingExpressions
+        .map(g => g.references)
+        .reduce((g1, g2) => g1 ++ g2)
+    }
+
+  val (items, conditions) = extractInnerJoins(plan)
+  val hg = new Hypergraph(items, conditions)
+  val jointree = hg.flatGYO
+
+  if (jointree == null) {
+    false // optimization cannot be applied
+  } else {
+    // Check if there is a single tree node containing all attributes
+    val nodeContainingAllAttributes = jointree
+      .findNodeContainingAttributes(aggregateAttributes ++ groupAttributes)
+    if (nodeContainingAllAttributes == null) {
+      true
+    } else { false }
   }
 }
 
