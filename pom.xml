@@ -2766,6 +2766,12 @@
         <artifactId>arpack</artifactId>
         <version>${netlib.ludovic.dev.version}</version>
       </dependency>
+      <!-- Spark SQL dependency (for SparkSession) -->
+      <dependency>
+        <groupId>org.apache.spark</groupId>
+        <artifactId>spark-sql_2.12</artifactId>
+        <version>3.2.1</version>
+      </dependency>
     </dependencies>
   </dependencyManagement>
 
