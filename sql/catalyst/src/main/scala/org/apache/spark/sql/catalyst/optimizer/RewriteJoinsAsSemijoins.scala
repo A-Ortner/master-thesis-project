@@ -424,44 +424,28 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
         case agg@Aggregate(groupingExpressions, aggExpressions,
         project@Project(projectList,
         join@Join(_, _, Inner, _, _))) =>
-          val unguarded = isUnguarded(plan, groupingExpressions, aggExpressions)
-          if (unguarded) {
-            logWarning("a: query unguarded. ")
-            return plan
-          } else {
-            logWarning("a: query guarded or piecewise guarded. ")
             rewritePlan(agg, groupingExpressions, aggExpressions, projectList,
               join, keyRefs = Seq(), uniqueConstraints = Seq())
-          }
+
         // FK/PK optimizations (to be removed at some point)
 
         case agg@Aggregate(groupingExpressions, aggExpressions,
         project@Project(projectList,
         FKHint(join@Join(_, _, Inner, _, _), keyRefs, uniqueConstraints))) =>
-          val unguarded = isUnguarded(plan, groupingExpressions, aggExpressions)
-          if (unguarded) {
-            logWarning("a: query unguarded. ")
-            return plan
-          } else {
-            logWarning("a: query guarded or piecewise guarded. ")
+
             rewritePlan(agg, groupingExpressions, aggExpressions, projectList,
               join, keyRefs, uniqueConstraints)
-          }
+
 
         case agg@Aggregate(groupingExpressions, aggExpressions,
         project@Project(projectList,
         FKHint(
         project2@Project(projectList2,
         join@Join(_, _, Inner, _, _)), keyRefs, uniqueConstraints))) =>
-          val unguarded = isUnguarded(plan, groupingExpressions, aggExpressions)
-          if (unguarded) {
-            logWarning("a: query unguarded. ")
-            return plan
-          } else {
-            logWarning("a: query guarded or piecewise guarded. ")
+
             rewritePlan(agg, groupingExpressions, aggExpressions, projectList,
               join, keyRefs, uniqueConstraints)
-          }
+
 
         case agg@Aggregate(_, _, _) =>
           logWarning("not applicable to aggregate: " + agg)
@@ -578,74 +562,6 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
     }
   }
 
-
-  def isUnguarded(
-                   plan: LogicalPlan,
-                   unnamedGroupingExpressions: Seq[Expression],
-                   resultExpressions: Seq[NamedExpression]
-                 ): Boolean = {
-
-    val namedGroupingExpressions = unnamedGroupingExpressions.map {
-      case ne: NamedExpression => ne -> ne
-      // If the expression is not a NamedExpression, we add an alias.
-      // This allows the Aggregate Operator to directly get the Seq of attributes
-      // representing the grouping expressions.
-      case other =>
-        val withAlias = Alias(other, other.toString)()
-        other -> withAlias
-    }
-
-    var unguarded = false;
-    val groupingExpressions = namedGroupingExpressions.map(_._2)
-
-    val aggregateAttributes = resultExpressions
-      .map(expr => expr.references)
-      .reduce((a1, a2) => a1 ++ a2)
-
-    val groupAttributes =
-      if (groupingExpressions.isEmpty) {
-        AttributeSet.empty
-      } else {
-        groupingExpressions
-          .map(g => g.references)
-          .reduce((g1, g2) => g1 ++ g2)
-      }
-
-    val (items, conditions) = extractInnerJoins(plan)
-    val hg = new Hypergraph(items, conditions)
-    val jointree = hg.flatGYO
-
-    if (jointree == null) {
-      logWarning("a: join tree is null.")
-      unguarded = false; // optimization cannot be applied, thus flag is set to false
-    } else {
-      // Check if there is a single tree node containing all attributes
-      val nodeContainingAllAttributes = jointree
-        .findNodeContainingAttributes(aggregateAttributes ++ groupAttributes)
-
-      // check if query is piece-wise guarded
-      val nodeContainingGroupAttributes = jointree.findNodeContainingAttributes(groupAttributes)
-
-      if (nodeContainingAllAttributes == null) {
-        // not fully guarded
-        logWarning("a: not fully guarded.")
-        if (nodeContainingGroupAttributes == null) {
-          // neither fully nor piecewise guarded -> unguarded
-          logWarning("a: not guarded at all. ")
-          unguarded = true
-        } else {
-        // query is piecewise guarded
-          logWarning("a: piecewise guarded.")
-          unguarded = false
-        }
-      } else {
-        // query is fully guarded
-        logWarning("a: query is fully guarded.")
-        unguarded = false;
-      }
-    }
-    return unguarded;
-  }
 
   class HGEdge(val vertices: Set[String], val name: String, val planReference: LogicalPlan,
                val attributeToVertex: mutable.Map[ExprId, String]) {
