@@ -18,11 +18,11 @@
 package org.apache.spark.sql.catalyst.optimizer
 
 import scala.collection.mutable
-
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.dsl.expressions.DslExpression
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate._
+import org.apache.spark.sql.catalyst.optimizer.RewriteJoinsAsSemijoins.HTNode
 import org.apache.spark.sql.catalyst.plans.{Inner, InnerLike, LeftSemi}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
@@ -200,6 +200,25 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
           else {
             if (!conf.yannakakisUnguardedEnabled) {
               logWarning("unguarded. plan is not changed")
+              // query is unguarded, join tree is not cyclic
+              // find the unguarded elements, in GROUP BY (limit to 2 relations)
+              // set root node to one relation that contains a group element
+              root = null;
+              var nodesContainingGroupAttributes = jointree.findNodesContainingAttributes(groupAttributes)
+              if (nodesContainingGroupAttributes.size > 2) {
+                // do nothing, resort to normal algorithm
+                return agg
+              }
+
+
+              // find path between  (simple) root guard A (grouping attribute relation 1) and relation B to be joined (relation 2) -> just traverse tree
+              var path = jointree.findPath(nodesContainingGroupAttributes.head, nodesContainingGroupAttributes.tail)
+
+              // Join every relation along the path (maybe do projections in-between?) to create root guard
+              var root_guard = jointree.join(path);
+              root = root_guard
+
+
               return agg
             }
           }
@@ -1046,6 +1065,22 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
         root.setParentReferences
         root
       }
+    }
+
+    def findNodesContainingAttributes(aggAttributes: AttributeSet): Set[HTNode] = {
+      // find relation for each node, no duplicates
+      var nodes = Set[HTNode]();
+
+      aggAttributes.foreach(el => {
+        for (c <- children) {
+          val node = c.findNodeContainingAttributes(AttributeSet(el)) // how to find nodes that are near to root?
+          if (node != null) {
+            nodes += node
+          }
+        }
+      });
+      return nodes;
+
     }
 
     def findNodeContainingAttributes(aggAttributes: AttributeSet): HTNode = {
