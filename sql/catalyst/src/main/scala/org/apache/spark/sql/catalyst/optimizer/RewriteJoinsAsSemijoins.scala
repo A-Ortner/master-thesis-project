@@ -202,24 +202,27 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
               logWarning("unguarded. plan is not changed")
               // query is unguarded, join tree is not cyclic
               // find the unguarded elements, in GROUP BY (limit to 2 relations)
-              // set root node to one relation that contains a group element
-              root = null;
+
               var nodesContainingGroupAttributes = jointree.findNodesContainingAttributes(groupAttributes)
               if (nodesContainingGroupAttributes.size > 2) {
                 // do nothing, resort to normal algorithm
                 return agg
               }
 
+              root = nodesContainingGroupAttributes.head.reroot; //set root to one of the relations that already contains a grouped attribute
 
-              // find path between  (simple) root guard A (grouping attribute relation 1) and relation B to be joined (relation 2) -> just traverse tree
-              var path = jointree.findPath(nodesContainingGroupAttributes.head, nodesContainingGroupAttributes.tail)
+              // find path between  (simple) root guard A (grouping attribute relation 1) and relation B to be joined (relation 2)
 
-              // Join every relation along the path (maybe do projections in-between?) to create root guard
-              var root_guard = jointree.join(path);
-              root = root_guard
+              var path = jointree.findPath(
+                nodesContainingGroupAttributes.head, nodesContainingGroupAttributes.tail.head);
 
 
-              return agg
+              // Join every relation along the path to create root guard
+              var root_guard = jointree.join(path); // directly manipulate join tree and return new guard
+              root = root_guard.reroot
+
+
+              return agg //instead of this, now AggJoin has to be executed on new join tree
             }
           }
           logWarning("applicable query (joins=" + (items.size - 1) + ")")
@@ -1036,6 +1039,23 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
            |${children.map(c => c.toString(level + 1)).mkString("\n")}""".stripMargin
 
     override def toString: String = toString(0)
+
+    /*
+    return an array of HTNodes starting with child and ending with root
+     */
+    def findPath(root: HTNode, child: HTNode): Array[HTNode] = {
+      val path = scala.collection.mutable.ArrayBuffer[HTNode]()
+      var curr = child
+
+      while (!curr.equals(root)) {
+        path += curr
+        curr = curr.parent
+      }
+
+      path += root
+
+      return path.toArray
+    }
   }
 
   class Hypergraph(private val items: Seq[LogicalPlan],
