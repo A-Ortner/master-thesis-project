@@ -779,7 +779,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                 //    Y(c)      Z(a)
                 //
                 val newAgg = Sum(lastSumAtt).toAggregateExpression()
-                val newAggNamed = Sum(lastSumAtt).asInstanceOf[NamedExpression]
+                val newAggNamed = newAgg.resultAttribute.asInstanceOf[NamedExpression]
                 applicableAggExpressions = applicableAggExpressions :+ newAgg
                 applicableAggExpressionsSeq = applicableAggExpressionsSeq :+ newAggNamed
 
@@ -804,7 +804,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                 //    Y(a,c)     Z(c)
 
                 val countRightAgg = Count(Literal(1L)).toAggregateExpression()
-                val countRightAggNamed = Count(Literal(1L)).asInstanceOf[NamedExpression]
+                val countRightAggNamed = countRightAgg.resultAttribute.asInstanceOf[NamedExpression]
                 applicableAggExpressions = applicableAggExpressions :+ countRightAgg
                 applicableAggExpressionsSeq = applicableAggExpressionsSeq :+ countRightAggNamed
 
@@ -941,28 +941,16 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
 
 
             // normalJoin
-            Aggregate(groupingExpressions,
+            /* Aggregate(groupingExpressions,
               applicableAggExpressionsSeq,
-              Project(normalJoin.output ++ multiplySumExpressions, normalJoin))
+              Project(normalJoin.output ++ multiplySumExpressions, normalJoin)) */
             // Project(normalJoin.output ++ multiplySumExpressions, normalJoin)
 
-            /* if (multiplySumExpressions.isEmpty) {
-              // val currSum = Alias(Literal(1L, LongType), "sum")()
-              // multiplySumExpressions = multiplySumExpressions :+ currSum
-              // logWarning("add just count column and 1 as sum")
-              // Project(normalJoin.output ++ valAliasAsList ++ multiplySumExpressions, normalJoin)
-              logWarning("doing just a join, no projection")
-              normalJoin
+            /* Project(Aggregate(groupingExpressions,
+            applicableAggExpressionsSeq, normalJoin).output
+              ++ multiplySumExpressions, normalJoin) */
 
-            } else {
-              // val newSum = Alias(Literal(1L, LongType), "sum")()
-              // do i have to replace sum with 1 or not?
-
-              // multiplySumExpressions = multiplySumExpressions :+ newSum
-              logWarning("add sum and count column")
-              Project(normalJoin.output ++ multiplySumExpressions ++ valAliasAsList, normalJoin)
-            } */
-
+            Aggregate(groupingExpressions, applicableAggExpressionsSeq, normalJoin)
 
 
           } else if (multiplySumExpressions.isEmpty) {
