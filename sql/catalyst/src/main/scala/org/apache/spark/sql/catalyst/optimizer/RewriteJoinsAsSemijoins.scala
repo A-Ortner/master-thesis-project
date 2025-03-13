@@ -18,11 +18,11 @@
 package org.apache.spark.sql.catalyst.optimizer
 
 import scala.collection.mutable
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.dsl.expressions.DslExpression
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate._
-import org.apache.spark.sql.catalyst.optimizer.RewriteJoinsAsSemijoins.HTNode
 import org.apache.spark.sql.catalyst.plans.{Inner, InnerLike, LeftSemi}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
@@ -199,30 +199,9 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
           }
           else {
             if (!conf.yannakakisUnguardedEnabled) {
-              logWarning("unguarded. plan is not changed")
-              // query is unguarded, join tree is not cyclic
-              // find the unguarded elements, in GROUP BY (limit to 2 relations)
+              logWarning("unguarded. plan should now still work with join-projection")
 
-              var nodesContainingGroupAttributes = jointree.findNodesContainingAttributes(groupAttributes)
-              if (nodesContainingGroupAttributes.size > 2) {
-                // do nothing, resort to normal algorithm
-                return agg
-              }
-
-              root = nodesContainingGroupAttributes.head.reroot; //set root to one of the relations that already contains a grouped attribute
-
-              // find path between  (simple) root guard A (grouping attribute relation 1) and relation B to be joined (relation 2)
-
-              var path = jointree.findPath(
-                nodesContainingGroupAttributes.head, nodesContainingGroupAttributes.tail.head);
-
-
-              // Join every relation along the path to create root guard
-              var root_guard = jointree.join(path); // directly manipulate join tree and return new guard
-              root = root_guard.reroot
-
-
-              return agg //instead of this, now AggJoin has to be executed on new join tree
+              // return agg
             }
           }
           logWarning("applicable query (joins=" + (items.size - 1) + ")")
@@ -238,6 +217,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
 
           //          logWarning("lastAggMap: " + lastAggMap)
           //          logWarning("lastSumMap: " + lastSumMap)
+
+          logWarning("lastSumMap: " + lastSumMap)
 
           val rewrittenResultExpressions = resultExpressionsWithAliasesReplaced.map {
             expr =>
@@ -626,7 +607,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                                    uniqueConstraints: Seq[Seq[Expression]], groupInLeaves: Boolean,
                                    usePhysicalCountJoin: Boolean = false):
     (LogicalPlan, NamedExpression, Boolean, Boolean) = {
-
+      logWarning("enable physical count join: " + usePhysicalCountJoin)
       val edge = edges.head
       val scanPlan = edge.planReference
       val vertices = edge.vertices
@@ -754,11 +735,16 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
             && ref.last.references.head.exprId == atts._2.exprId))
 
         val newRightCount = Alias(Literal(1L, LongType), "c")()
+        var applicableGroupAttributes = Seq[NamedExpression]() // todo: ggf set flag
+        val count = Count(Literal(1L)).toAggregateExpression()
+        val count_alias = Alias(Literal(1L, LongType), "c")()
 
         val join = if (usePhysicalCountJoin && !canSemiJoin) {
           var applicableAggExpressions = {
             new mutable.MutableList[AggregateExpression]()
           }
+          var applicableAggExpressionsSeq: Seq[NamedExpression] = Seq[NamedExpression]()
+
           var multiplySumExpressions = new mutable.MutableList[NamedExpression]()
 
           def createMultiplication(a: Expression, b: Expression): Expression = {
@@ -793,7 +779,9 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                 //    Y(c)      Z(a)
                 //
                 val newAgg = Sum(lastSumAtt).toAggregateExpression()
+                val newAggNamed = Sum(lastSumAtt).asInstanceOf[NamedExpression]
                 applicableAggExpressions = applicableAggExpressions :+ newAgg
+                applicableAggExpressionsSeq = applicableAggExpressionsSeq :+ newAggNamed
 
                 if (leftPlan.outputSet.contains(leftCountAttribute)) {
                   val newSum = Alias(createMultiplication(newAgg.resultAttribute,
@@ -816,7 +804,9 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                 //    Y(a,c)     Z(c)
 
                 val countRightAgg = Count(Literal(1L)).toAggregateExpression()
+                val countRightAggNamed = Count(Literal(1L)).asInstanceOf[NamedExpression]
                 applicableAggExpressions = applicableAggExpressions :+ countRightAgg
+                applicableAggExpressionsSeq = applicableAggExpressionsSeq :+ countRightAggNamed
 
                 val newSum = Alias(createMultiplication(lastSumAtt,
                   countRightAgg.resultAttribute), "sum")()
@@ -852,7 +842,18 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                   }.asInstanceOf[AggregateExpression]
                 }
 
+                val newAggNamed = if (rightPlanIsLeaf) {
+                  agg.resultAttribute.asInstanceOf[NamedExpression]
+                } else {
+                  agg.transformUp {
+                    case a: AggregateFunction =>
+                      a.withNewChildren(Seq(createMultiplication(a.children.head,
+                        rightCountAttribute)))
+                  }.asInstanceOf[NamedExpression]
+                }
+
                 applicableAggExpressions = applicableAggExpressions :+ newAgg
+                applicableAggExpressionsSeq = applicableAggExpressionsSeq :+ newAggNamed
 
                 // Left plan is not a leaf
                 if (leftPlan.outputSet.contains(leftCountAttribute)) {
@@ -887,9 +888,15 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                     val newAgg = lastAgg.transformDown {
                       case a: AggregateFunction => a.withNewChildren(Seq(lastAgg.resultAttribute))
                     }.asInstanceOf[AggregateExpression]
+
+                    val newAggNamed = lastAgg.transformDown {
+                      case a: AggregateFunction => a.withNewChildren(Seq(lastAgg.resultAttribute))
+                    }.asInstanceOf[NamedExpression]
+
                     lastAggMap.put(agg.resultAttribute, newAgg)
 
                     applicableAggExpressions = applicableAggExpressions :+ newAgg
+                    applicableAggExpressionsSeq = applicableAggExpressionsSeq :+ newAggNamed
                   }
                 }
                 else {
@@ -898,13 +905,17 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                   if (agg.references.subsetOf(rightPlan.outputSet)) {
                     lastAggMap.put(agg.resultAttribute, agg)
                     applicableAggExpressions = applicableAggExpressions :+ agg
+
+                    applicableAggExpressionsSeq =
+                      applicableAggExpressionsSeq :+
+                        agg.resultAttribute.asInstanceOf[NamedExpression]
                   }
                 }
             }
           })
           //        logWarning("applicable agg expressions: " + applicableAggExpressions)
 
-          val applicableGroupAttributes = groupingExpressions.filter(
+          applicableGroupAttributes = groupingExpressions.filter(
             groupExpr => {
               groupExpr.references.subsetOf(rightPlan.outputSet)
             }
@@ -919,7 +930,42 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
             Option(if (rightPlanIsLeaf) newRightCount else rightCountAttribute),
             applicableAggExpressions, applicableGroupAttributes, joinHint)
 
-          if (multiplySumExpressions.isEmpty) {
+
+
+          if (applicableGroupAttributes.nonEmpty) {
+            // this node contains group attributes that need to be propagated by a full join
+            logWarning("apply normal joins instead of aggjoin and propagate sums ")
+            val normalJoin = Join(leftPlan, rightPlan,
+              Inner, Option(joinConditions), joinHint)
+
+
+
+            // normalJoin
+            Aggregate(groupingExpressions,
+              applicableAggExpressionsSeq,
+              Project(normalJoin.output ++ multiplySumExpressions, normalJoin))
+            // Project(normalJoin.output ++ multiplySumExpressions, normalJoin)
+
+            /* if (multiplySumExpressions.isEmpty) {
+              // val currSum = Alias(Literal(1L, LongType), "sum")()
+              // multiplySumExpressions = multiplySumExpressions :+ currSum
+              // logWarning("add just count column and 1 as sum")
+              // Project(normalJoin.output ++ valAliasAsList ++ multiplySumExpressions, normalJoin)
+              logWarning("doing just a join, no projection")
+              normalJoin
+
+            } else {
+              // val newSum = Alias(Literal(1L, LongType), "sum")()
+              // do i have to replace sum with 1 or not?
+
+              // multiplySumExpressions = multiplySumExpressions :+ newSum
+              logWarning("add sum and count column")
+              Project(normalJoin.output ++ multiplySumExpressions ++ valAliasAsList, normalJoin)
+            } */
+
+
+
+          } else if (multiplySumExpressions.isEmpty) {
             countJoin
           }
           else {
@@ -936,11 +982,34 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
         } else {
           if (usePhysicalCountJoin) {
             // The summed-up and multiplied result is already in the right count attribute
-            if (rightPlanIsLeaf) {
+            if (applicableGroupAttributes.nonEmpty) {
+              logWarning("project count alias within physical join")
+
+              if(isLeafNode) {
+                count_alias
+              } else {
+                // Multiply the left count with the right count
+                Alias(Multiply(
+                  Cast(leftCountAttribute, rightCountAttribute.dataType),
+                  rightCountAttribute), "c")()
+              }
+
+            }
+            else if (rightPlanIsLeaf) {
               newRightCount
             }
             else {
               rightCountAttribute
+            }
+          } else if (applicableGroupAttributes.nonEmpty) {
+              logWarning("project count alias")
+            if(isLeafNode) {
+              count_alias
+            } else {
+              // Multiply the left count with the right count
+              Alias(Multiply(
+                Cast(leftCountAttribute, rightCountAttribute.dataType),
+                rightCountAttribute), "c")()
             }
           }
           else {
@@ -954,7 +1023,10 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
         val finalProjection = join
 
         prevPlan = finalProjection
+
         prevCountExpr = finalCountExpr
+
+
         isLeafNode = false
         prevChildEdge = childEdge
         prevSemijoined = canSemiJoin
@@ -992,7 +1064,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
 
       aggAttributes.foreach(el => {
         for (c <- children) {
-          val node = c.findNodeContainingAttributes(AttributeSet(el)) // how to find nodes that are near to root?
+          val node = c.findNodeContainingAttributes(AttributeSet(el))
+          // how to find nodes that are near to root?
           if (node != null) {
             nodes += node
           }
