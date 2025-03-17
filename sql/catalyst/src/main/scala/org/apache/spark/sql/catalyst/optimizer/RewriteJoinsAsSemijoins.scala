@@ -615,6 +615,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
       val uniqueSets = uniqueConstraints.map(constraint => AttributeSet(constraint))
       // Get the attributes as part of the join tree
       val nodeAttributes = AttributeSet(vertices.map(v => edge.vertexToAttribute(v)))
+      logWarning("node attributes: " + nodeAttributes)
 
       // Check if grouping in leaves is enabled, and no primary keys are part of the leaf
       // Also avoid grouping when the leaves contain output atts, since they are most likely
@@ -946,11 +947,25 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
               Project(normalJoin.output ++ multiplySumExpressions, normalJoin)) */
             // Project(normalJoin.output ++ multiplySumExpressions, normalJoin)
 
-            /* Project(Aggregate(groupingExpressions,
-            applicableAggExpressionsSeq, normalJoin).output
-              ++ multiplySumExpressions, normalJoin) */
+            logWarning("multiplySumExpresions: " + multiplySumExpressions.size)
+            logWarning("groupingExpressions: " + groupingExpressions)
+            logWarning("applicableAggExpressionsSeq: " + applicableAggExpressionsSeq)
 
-            Aggregate(groupingExpressions, applicableAggExpressionsSeq, normalJoin)
+            val countList = List(count_alias)
+            if(applicableAggExpressionsSeq.isEmpty) {
+              Project(normalJoin.output
+                ++ countList, normalJoin)
+
+            } else {
+              /* Project(Aggregate(groupingExpressions,
+                applicableAggExpressionsSeq, normalJoin).output
+                ++ countList, normalJoin) */
+              Aggregate(groupingExpressions,
+                applicableAggExpressionsSeq, normalJoin)
+
+            }
+
+            // Aggregate(groupingExpressions, applicableAggExpressionsSeq, normalJoin)
 
 
           } else if (multiplySumExpressions.isEmpty) {
@@ -974,9 +989,11 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
               logWarning("project count alias within physical join")
 
               if(isLeafNode) {
+                logWarning("leafnode, projecting: " + count_alias)
                 count_alias
               } else {
                 // Multiply the left count with the right count
+                logWarning("non leaf node")
                 Alias(Multiply(
                   Cast(leftCountAttribute, rightCountAttribute.dataType),
                   rightCountAttribute), "c")()
