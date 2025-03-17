@@ -215,10 +215,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
               conf.yannakakisCountGroupInLeavesEnabled,
               usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
 
-          //          logWarning("lastAggMap: " + lastAggMap)
-          //          logWarning("lastSumMap: " + lastSumMap)
-
           logWarning("lastSumMap: " + lastSumMap)
+          logWarning("lastAggMap: " + lastSumMap)
 
           val rewrittenResultExpressions = resultExpressionsWithAliasesReplaced.map {
             expr =>
@@ -290,9 +288,13 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
           }
           //          logWarning("rewritten result expressions: " + rewrittenResultExpressions)
 
+          logWarning("yann output: " + yannakakisJoins.output)
+          logWarning("groupAliasProjection beginning: " + groupAliasProjections)
+          logWarning("rewrittenResultExpressions beginning: " + rewrittenResultExpressions)
+          logWarning("groupingExpressions: " + groupingExpressions)
           val newAgg = Aggregate(groupingExpressions,
             rewrittenResultExpressions,
-            Project(yannakakisJoins.output ++ groupAliasProjections, yannakakisJoins))
+          Project(yannakakisJoins.output ++ groupAliasProjections, yannakakisJoins))
           //          val newAgg = Aggregate(groupingExpressions,
           //            newCountingAggregates ++ rewrittenResultExpressions ++ projectExpressions,
           //            yannakakisJoins)
@@ -780,9 +782,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                 //    Y(c)      Z(a)
                 //
                 val newAgg = Sum(lastSumAtt).toAggregateExpression()
-                val newAggNamed = newAgg.resultAttribute.asInstanceOf[NamedExpression]
                 applicableAggExpressions = applicableAggExpressions :+ newAgg
-                applicableAggExpressionsSeq = applicableAggExpressionsSeq :+ newAggNamed
+                applicableAggExpressionsSeq = applicableAggExpressionsSeq :+ Alias(newAgg, "agg")()
 
                 if (leftPlan.outputSet.contains(leftCountAttribute)) {
                   val newSum = Alias(createMultiplication(newAgg.resultAttribute,
@@ -805,9 +806,9 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                 //    Y(a,c)     Z(c)
 
                 val countRightAgg = Count(Literal(1L)).toAggregateExpression()
-                val countRightAggNamed = countRightAgg.resultAttribute.asInstanceOf[NamedExpression]
                 applicableAggExpressions = applicableAggExpressions :+ countRightAgg
-                applicableAggExpressionsSeq = applicableAggExpressionsSeq :+ countRightAggNamed
+                applicableAggExpressionsSeq =
+                  applicableAggExpressionsSeq :+ Alias(countRightAgg, "c")()
 
                 val newSum = Alias(createMultiplication(lastSumAtt,
                   countRightAgg.resultAttribute), "sum")()
@@ -843,18 +844,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                   }.asInstanceOf[AggregateExpression]
                 }
 
-                val newAggNamed = if (rightPlanIsLeaf) {
-                  agg.resultAttribute.asInstanceOf[NamedExpression]
-                } else {
-                  agg.transformUp {
-                    case a: AggregateFunction =>
-                      a.withNewChildren(Seq(createMultiplication(a.children.head,
-                        rightCountAttribute)))
-                  }.asInstanceOf[NamedExpression]
-                }
-
                 applicableAggExpressions = applicableAggExpressions :+ newAgg
-                applicableAggExpressionsSeq = applicableAggExpressionsSeq :+ newAggNamed
+                applicableAggExpressionsSeq = applicableAggExpressionsSeq :+ Alias(newAgg, "agg")()
 
                 // Left plan is not a leaf
                 if (leftPlan.outputSet.contains(leftCountAttribute)) {
@@ -890,14 +881,13 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                       case a: AggregateFunction => a.withNewChildren(Seq(lastAgg.resultAttribute))
                     }.asInstanceOf[AggregateExpression]
 
-                    val newAggNamed = lastAgg.transformDown {
-                      case a: AggregateFunction => a.withNewChildren(Seq(lastAgg.resultAttribute))
-                    }.asInstanceOf[NamedExpression]
+
 
                     lastAggMap.put(agg.resultAttribute, newAgg)
 
                     applicableAggExpressions = applicableAggExpressions :+ newAgg
-                    applicableAggExpressionsSeq = applicableAggExpressionsSeq :+ newAggNamed
+                    applicableAggExpressionsSeq =
+                      applicableAggExpressionsSeq :+ Alias(newAgg, "agg")()
                   }
                 }
                 else {
@@ -909,7 +899,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
 
                     applicableAggExpressionsSeq =
                       applicableAggExpressionsSeq :+
-                        agg.resultAttribute.asInstanceOf[NamedExpression]
+                        Alias(agg, "agg")()
                   }
                 }
             }
@@ -953,15 +943,19 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
 
             val countList = List(count_alias)
             if(applicableAggExpressionsSeq.isEmpty) {
-              Project(normalJoin.output
-                ++ countList, normalJoin)
+              Project(normalJoin.output, normalJoin)
 
             } else {
-              /* Project(Aggregate(groupingExpressions,
+            /* Project(Aggregate(groupingExpressions,
                 applicableAggExpressionsSeq, normalJoin).output
-                ++ countList, normalJoin) */
-              Aggregate(groupingExpressions,
-                applicableAggExpressionsSeq, normalJoin)
+                , normalJoin) */
+              /* val agg = Aggregate(groupingExpressions,
+                applicableAggExpressionsSeq ++ groupingExpressions ++
+                  lastSumMap.keySet, normalJoin) */
+            val agg = Aggregate(groupingExpressions, groupingExpressions ++
+              applicableAggExpressionsSeq, normalJoin)
+              logWarning("aggretate.output: " + agg.output)
+              agg
 
             }
 
