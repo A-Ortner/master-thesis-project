@@ -216,7 +216,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
               usePhysicalCountJoin = conf.yannakakisPhysicalCountEnabled)
 
           logWarning("lastSumMap: " + lastSumMap)
-          logWarning("lastAggMap: " + lastSumMap)
+          logWarning("lastAggMap: " + lastAggMap)
 
           val rewrittenResultExpressions = resultExpressionsWithAliasesReplaced.map {
             expr =>
@@ -664,8 +664,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                         rightCountAttribute: Attribute,
                         canSemiJoin: Boolean,
                         newRightCount: Alias,
-                        applicableGroupAttributes: Seq[NamedExpression],
-                        count_alias: Alias) = {
+                        applicableGroupAttributes: Seq[NamedExpression]) = {
         if (canSemiJoin) {
           // When semi-joining we only have one count attribute
           leftCountAttribute
@@ -676,8 +675,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
               logWarning("project count alias within physical join")
 
               if (isLeafNode) {
-                logWarning("leafnode, projecting: " + count_alias)
-                count_alias
+                logWarning("leafnode, projecting: " + newRightCount)
+                newRightCount
               } else {
                 // Multiply the left count with the right count
                 logWarning("non leaf node")
@@ -696,7 +695,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
           } else if (applicableGroupAttributes.nonEmpty) {
             logWarning("project count alias")
             if (isLeafNode) {
-              count_alias
+              newRightCount
             } else {
               // Multiply the left count with the right count
               Alias(Multiply(
@@ -982,8 +981,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
             rightCountAttribute,
             canSemiJoin,
             newRightCount,
-            applicableGroupAttributes,
-            count_alias)
+            applicableGroupAttributes)
 
 
           if (applicableGroupAttributes.nonEmpty) {
@@ -1004,7 +1002,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
             logWarning("groupingExpressions: " + groupingExpressions)
             logWarning("applicableAggExpressionsSeq: " + applicableAggExpressionsSeq)
 
-            val countList = List(count_alias)
+            val countList = List(newRightCount)
             if(applicableAggExpressionsSeq.isEmpty) {
               Project(normalJoin.output ++ Seq(finalCountExpr), normalJoin)
 
@@ -1043,8 +1041,8 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
           rightCountAttribute,
           canSemiJoin,
           newRightCount,
-          applicableGroupAttributes,
-          count_alias)
+          applicableGroupAttributes
+          )
 
         val finalProjection = join
 
