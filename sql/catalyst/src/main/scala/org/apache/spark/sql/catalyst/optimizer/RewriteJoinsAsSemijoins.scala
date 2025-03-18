@@ -657,6 +657,62 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
       var prevSemijoined = false
 
       var prevChildEdge: HGEdge = edge
+
+
+      def getFinalCount(rightPlanIsLeaf: Boolean,
+                        leftCountAttribute: Attribute,
+                        rightCountAttribute: Attribute,
+                        canSemiJoin: Boolean,
+                        newRightCount: Alias,
+                        applicableGroupAttributes: Seq[NamedExpression],
+                        count_alias: Alias) = {
+        if (canSemiJoin) {
+          // When semi-joining we only have one count attribute
+          leftCountAttribute
+        } else {
+          if (usePhysicalCountJoin) {
+            // The summed-up and multiplied result is already in the right count attribute
+            if (applicableGroupAttributes.nonEmpty) {
+              logWarning("project count alias within physical join")
+
+              if (isLeafNode) {
+                logWarning("leafnode, projecting: " + count_alias)
+                count_alias
+              } else {
+                // Multiply the left count with the right count
+                logWarning("non leaf node")
+                Alias(Multiply(
+                  Cast(leftCountAttribute, rightCountAttribute.dataType),
+                  rightCountAttribute), "c")()
+              }
+
+            }
+            else if (rightPlanIsLeaf) {
+              newRightCount
+            }
+            else {
+              rightCountAttribute
+            }
+          } else if (applicableGroupAttributes.nonEmpty) {
+            logWarning("project count alias")
+            if (isLeafNode) {
+              count_alias
+            } else {
+              // Multiply the left count with the right count
+              Alias(Multiply(
+                Cast(leftCountAttribute, rightCountAttribute.dataType),
+                rightCountAttribute), "c")()
+            }
+          }
+          else {
+            // Multiply the left count with the right count
+            Alias(Multiply(
+              Cast(leftCountAttribute, rightCountAttribute.dataType),
+              rightCountAttribute), "c")()
+          }
+        }
+      }
+
       for (c <- children) {
         val childEdge = c.edges.head
         val childVertices = childEdge.vertices
@@ -921,6 +977,13 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
             Option(if (rightPlanIsLeaf) newRightCount else rightCountAttribute),
             applicableAggExpressions, applicableGroupAttributes, joinHint)
 
+          val finalCountExpr = getFinalCount(rightPlanIsLeaf,
+            leftCountAttribute,
+            rightCountAttribute,
+            canSemiJoin,
+            newRightCount,
+            applicableGroupAttributes,
+            count_alias)
 
 
           if (applicableGroupAttributes.nonEmpty) {
@@ -943,7 +1006,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
 
             val countList = List(count_alias)
             if(applicableAggExpressionsSeq.isEmpty) {
-              Project(normalJoin.output, normalJoin)
+              Project(normalJoin.output ++ Seq(finalCountExpr), normalJoin)
 
             } else {
             /* Project(Aggregate(groupingExpressions,
@@ -953,7 +1016,7 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
                 applicableAggExpressionsSeq ++ groupingExpressions ++
                   lastSumMap.keySet, normalJoin) */
             val agg = Aggregate(groupingExpressions, groupingExpressions ++
-              applicableAggExpressionsSeq, normalJoin)
+              applicableAggExpressionsSeq ++ Seq(finalCountExpr), normalJoin)
               logWarning("aggretate.output: " + agg.output)
               agg
 
@@ -973,52 +1036,16 @@ object RewriteJoinsAsSemijoins extends Rule[LogicalPlan] with PredicateHelper {
             if (canSemiJoin) LeftSemi else Inner, Option(joinConditions), joinHint)
         }
         //      logWarning("join output: " + join.output)
-        val finalCountExpr = if (canSemiJoin) {
-          // When semi-joining we only have one count attribute
-          leftCountAttribute
-        } else {
-          if (usePhysicalCountJoin) {
-            // The summed-up and multiplied result is already in the right count attribute
-            if (applicableGroupAttributes.nonEmpty) {
-              logWarning("project count alias within physical join")
-
-              if(isLeafNode) {
-                logWarning("leafnode, projecting: " + count_alias)
-                count_alias
-              } else {
-                // Multiply the left count with the right count
-                logWarning("non leaf node")
-                Alias(Multiply(
-                  Cast(leftCountAttribute, rightCountAttribute.dataType),
-                  rightCountAttribute), "c")()
-              }
-
-            }
-            else if (rightPlanIsLeaf) {
-              newRightCount
-            }
-            else {
-              rightCountAttribute
-            }
-          } else if (applicableGroupAttributes.nonEmpty) {
-              logWarning("project count alias")
-            if(isLeafNode) {
-              count_alias
-            } else {
-              // Multiply the left count with the right count
-              Alias(Multiply(
-                Cast(leftCountAttribute, rightCountAttribute.dataType),
-                rightCountAttribute), "c")()
-            }
-          }
-          else {
-            // Multiply the left count with the right count
-            Alias(Multiply(
-              Cast(leftCountAttribute, rightCountAttribute.dataType),
-              rightCountAttribute), "c")()
-          }
-        }
         //      logWarning("join output: " + join.output)
+
+        val finalCountExpr = getFinalCount(rightPlanIsLeaf,
+          leftCountAttribute,
+          rightCountAttribute,
+          canSemiJoin,
+          newRightCount,
+          applicableGroupAttributes,
+          count_alias)
+
         val finalProjection = join
 
         prevPlan = finalProjection
